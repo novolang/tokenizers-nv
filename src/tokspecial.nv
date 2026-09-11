@@ -1,0 +1,236 @@
+// tokspecial.nv — the special tokens, and where they go.
+//
+// TWO SEPARATE THINGS WEAR THE NAME "SPECIAL", and conflating them is
+// the usual source of confusion:
+//
+//   - **The named roles.**  `<unk>`, `<s>`, `</s>`, `<pad>`, `[CLS]`,
+//     `[SEP]`, `[MASK]`.  A model has an opinion about each: which id
+//     starts a sequence, which one ends it, which one padding uses.
+//     They are here as named fields rather than a list, because a caller
+//     asking "what is the end-of-sequence id" should not be searching a
+//     list of strings for it — and a generation loop asks that on every
+//     token.
+//   - **The literal matches.**  `<|im_start|>`, `<|endoftext|>`, a chat
+//     template's role markers.  These are matched in the input text
+//     before the model's own pipeline runs, and they live in
+//     `TokVocab.added` because that is what they are.
+//
+// THE TEMPLATE IS SEPARATE AGAIN.  Wrapping a sequence in `[CLS]` and
+// `[SEP]`, or in `<s>` and `</s>`, is a property of how the model is
+// being USED — a sentence-pair classifier wraps differently from a
+// single-text encoder, and a generation call wraps not at all.  So it is
+// a `TokTemplate` the caller chooses at `encode`, not something a
+// tokenizer does to every call.  The stdlib's `WordPiece` wraps
+// unconditionally; that is the behaviour this separation exists to fix.
+//
+// AN ABSENT ROLE IS -1, not an optional.  Most models have no `[MASK]`
+// and most have no `<pad>`; a caller checks the id it needs once at
+// setup and never again, and `-1` compares in one operation where `?Int`
+// would unwrap on every token.
+//
+// NO EFFECTS.
+
+use tokvocab
+
+// The named roles a model gives particular ids.
+//
+// ```novo
+// use tokspecial
+//
+// fn main() [io]
+//     println("${tokspecial.none().eos_id}")
+// ```
+pub struct TokSpecials
+    // The id for input the model could not represent.  -1 when the
+    // model has none — a byte-level BPE never needs one.
+    unk_id: Int
+    // The id that starts a sequence: `<s>`, `[CLS]`, `<|begin_of_text|>`.
+    bos_id: Int
+    // The id that ends one: `</s>`, `[SEP]`, `<|endoftext|>`.  THE ONE A
+    // GENERATION LOOP ASKS ABOUT on every token, which is why it is a
+    // field and not a lookup.
+    eos_id: Int
+    // The id batching pads with.
+    pad_id: Int
+    // The id that separates two sequences in a pair.  `[SEP]` for BERT;
+    // often the same id as `eos_id`.
+    sep_id: Int
+    // The id that marks a position to predict.  `[MASK]`, and -1 for
+    // every model that is not trained that way.
+    mask_id: Int
+
+// How a sequence is wrapped before it reaches the model.
+//
+// ```novo
+// use tokspecial
+//
+// fn main() [io]
+//     println("${TokTemplateNone == TokTemplateNone}")
+// ```
+pub enum TokTemplate
+    // Nothing added.  What a generation call wants: the model continues
+    // the text, and a `<s>` in the middle of a continuation is wrong.
+    TokTemplateNone
+    // `bos` at the front and `eos` at the back.  The sentence encoder's
+    // wrapping, and BERT's `[CLS] … [SEP]` under the general name.
+    TokTemplateSingle
+    // `bos A sep B eos` — two sequences, for a model that compares
+    // them.  What `encode_pair` applies.
+    TokTemplatePair
+    // `bos` only.  Llama's chat format, where the end marker comes from
+    // the template's own text rather than from the tokenizer.
+    TokTemplateBosOnly
+
+// No special tokens at all: every role -1.
+//
+// The honest default for a model whose vocabulary has not been read yet,
+// and the right answer for a plain byte-level BPE.
+//
+// ```novo
+// use tokspecial
+//
+// fn main() [io]
+//     println("${tokspecial.none().unk_id}")
+// ```
+pub fn none() -> TokSpecials
+    todo("tokenizers-nv.tokspecial.none")
+
+// The roles looked up by name in a vocabulary.
+//
+// Each name that the vocabulary has becomes its id; each one it does not
+// becomes -1.  Six lookups at setup, and none afterwards.
+//
+// ```novo
+// use tokspecial
+// use tokvocab
+//
+// fn main() [io]
+//     let v = tokvocab.of_tokens(["[PAD]", "[UNK]", "[CLS]", "[SEP]"])
+//     println("${tokspecial.of_names(v, "[UNK]", "[CLS]", "[SEP]", "[PAD]", "[SEP]", "[MASK]").unk_id}")
+// ```
+pub fn of_names(v: TokVocab, unk: Str, bos: Str, eos: Str, pad: Str, sep: Str,
+                mask: Str) -> TokSpecials
+    todo("tokenizers-nv.tokspecial.of_names")
+
+// BERT's six names, looked up in a vocabulary.
+//
+// `[UNK] [CLS] [SEP] [PAD] [SEP] [MASK]`, which is the set every BERT
+// checkpoint uses and the one the stdlib's `WordPiece` hard-codes half
+// of.
+//
+// ```novo
+// use tokspecial
+// use tokvocab
+//
+// fn main() [io]
+//     let v = tokvocab.of_tokens(["[PAD]", "[UNK]", "[CLS]", "[SEP]"])
+//     println("${tokspecial.bert_names(v).bos_id}")
+// ```
+pub fn bert_names(v: TokVocab) -> TokSpecials
+    todo("tokenizers-nv.tokspecial.bert_names")
+
+// GPT-2's one name: `<|endoftext|>` as both beginning and end, and
+// nothing else.
+//
+// ```novo
+// use tokspecial
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokspecial.gpt2_names(tokvocab.of_tokens(["<|endoftext|>"])).eos_id}")
+// ```
+pub fn gpt2_names(v: TokVocab) -> TokSpecials
+    todo("tokenizers-nv.tokspecial.gpt2_names")
+
+// The roles from a `tokenizer.json`'s `added_tokens` array's text.
+//
+// The general path: HuggingFace records each special token with its id
+// and its flags there, so a caller who has the file does not have to
+// know which names a model chose.
+//
+// ```novo
+// use tokspecial
+//
+// fn main() [io]
+//     match tokspecial.of_added_tokens_json("[]")
+//         Ok(s)  => println("${s.eos_id}")
+//         Err(_) => println("refused")
+// ```
+pub fn of_added_tokens_json(json: Str) -> Result<TokSpecials, TokFault>
+    todo("tokenizers-nv.tokspecial.of_added_tokens_json")
+
+// The added tokens a `tokenizer.json`'s `added_tokens` array describes.
+//
+// The other half of the same array: the literal matches, for
+// `tokvocab.with_added`.
+//
+// ```novo
+// use tokspecial
+// use std.list
+//
+// fn main() [io]
+//     match tokspecial.added_tokens_of_json("[]")
+//         Ok(a)  => println("${list.len(a)}")
+//         Err(_) => println("refused")
+// ```
+pub fn added_tokens_of_json(json: Str) -> Result<[TokAddedToken], TokFault>
+    todo("tokenizers-nv.tokspecial.added_tokens_of_json")
+
+// The same roles with a different end-of-sequence id.
+//
+// The one a caller overrides most: a chat model's stopping token is
+// often a role marker rather than the checkpoint's own `eos`.
+//
+// ```novo
+// use tokspecial
+//
+// fn main() [io]
+//     println("${tokspecial.with_eos(tokspecial.none(), 7).eos_id}")
+// ```
+pub fn with_eos(s: TokSpecials, id: Int) -> TokSpecials
+    todo("tokenizers-nv.tokspecial.with_eos")
+
+// Whether an id is one of the six named roles.
+//
+// What a generation loop asks before printing a token: a special id is
+// control and not text, and printing it is how `<|im_end|>` ends up in
+// somebody's chat window.
+//
+// ```novo
+// use tokspecial
+//
+// fn main() [io]
+//     println("${tokspecial.is_special(tokspecial.none(), 0)}")
+// ```
+pub fn is_special(s: TokSpecials, id: Int) -> Bool
+    todo("tokenizers-nv.tokspecial.is_special")
+
+// The ids a template puts around a sequence: what goes before, and what
+// goes after.
+//
+// Both lists, so `encode` is a concatenation rather than a branch per
+// template — and so a caller can see exactly what a template will add
+// before it adds it.
+//
+// ```novo
+// use tokspecial
+// use std.list
+//
+// fn main() [io]
+//     let (pre, post) = tokspecial.template_ids(TokTemplateSingle, tokspecial.none())
+//     println("${list.len(pre)} ${list.len(post)}")
+// ```
+pub fn template_ids(t: TokTemplate, s: TokSpecials) -> ([Int], [Int])
+    todo("tokenizers-nv.tokspecial.template_ids")
+
+// The ids a pair template puts between two sequences.
+//
+// ```novo
+// use tokspecial
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokspecial.pair_separator_ids(tokspecial.none()))}")
+// ```
+pub fn pair_separator_ids(s: TokSpecials) -> [Int]
+    todo("tokenizers-nv.tokspecial.pair_separator_ids")

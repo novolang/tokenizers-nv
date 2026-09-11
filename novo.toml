@@ -1,0 +1,41 @@
+[package]
+name        = "tokenizers-nv"
+version     = "0.0.1"
+description = "The tokenizer family behind one enum: byte-level BPE as GPT-2 does it, SentencePiece unigram, and WordPiece, with encode to ids, decode from ids, special-token handling, and a vocabulary loaded from a value the caller holds rather than from a file."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and for a tokenizer that is a real constraint rather than an
+# easy one: the reference implementations all open files.  A vocabulary
+# here is a VALUE the caller holds — the text of a `tokenizer.json`, a
+# `vocab.txt`, a merges table — so `std.hf` downloads it, the caller
+# reads it, and this package does the arithmetic.  What that buys is
+# that the same tokenizer runs in a wasm notebook, in a server, and
+# beside a model on a device, with no file system in any of them.
+layer       = "core"
+
+category    = "ai"
+
+tags        = ["tokenizer", "bpe", "sentencepiece", "wordpiece", "unigram", "gpt2", "llm", "nlp"]
+repository  = "https://github.com/novolang/tokenizers-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "BPE, SentencePiece and WordPiece behind one enum"
+
+[dependencies]
+# None, and the reason is worth stating: a tokenizer is byte arithmetic
+# and a table lookup.  The reference implementation reaches for a regex
+# engine for its pre-tokenizer patterns; this package writes those
+# patterns out as named rules instead — see `tokbpe`'s header — which
+# keeps the dependency list empty and the behaviour inspectable.

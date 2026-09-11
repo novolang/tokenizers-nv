@@ -1,0 +1,289 @@
+// tokunigram.nv — SentencePiece's unigram model.
+//
+// A DIFFERENT IDEA FROM BPE, and the difference is worth stating because
+// the two are usually presented as interchangeable.  BPE builds a
+// tokenisation greedily from the bottom: start with bytes, merge the
+// best pair, repeat.  Unigram works from the top: every piece in the
+// vocabulary carries a LOG PROBABILITY, and the tokenisation of a word
+// is the segmentation whose pieces' probabilities multiply to the
+// largest number.
+//
+// That is a shortest-path problem, and the algorithm is Viterbi over the
+// word's positions: `best[i]` is the score of the best segmentation of
+// the first `i` bytes, and it is `max` over every piece ending at `i` of
+// `best[i - len(piece)] + score(piece)`.  One pass forward, one walk
+// back.  Linear in the length times the number of pieces that can end at
+// a position, and exact — there is no greedy approximation in it.
+//
+// WHAT THAT BUYS: unigram can produce a segmentation BPE cannot reach,
+// because BPE's early merges constrain its later ones and unigram has no
+// history.  It is also why SentencePiece can sample alternative
+// segmentations of the same text for training augmentation, which BPE
+// cannot do without a separate dropout mechanism.
+//
+// WHITESPACE IS A CHARACTER.  SentencePiece's defining trick: replace
+// every space with `▁` (U+2581) before doing anything, and treat the
+// result as one unbroken string with no pre-tokenization at all.  A
+// space is then part of a piece rather than a boundary between pieces,
+// which is what makes the model language-independent — it works the same
+// on text that does not put spaces between words.  Decoding replaces
+// `▁` with a space again, and the leading one is dropped.
+//
+// BYTE FALLBACK.  A modern SentencePiece model includes the 256 tokens
+// `<0x00>` through `<0xFF>` and falls back to them for anything its
+// pieces cannot cover, which makes it lossless the way byte-level BPE
+// is.  An older one has only `<unk>` and loses those bytes.  Both are
+// here, and `byte_fallback` is which.
+//
+// NO EFFECTS.
+
+use tokvocab
+
+// One piece of a unigram vocabulary: its text and its score.
+//
+// ```novo
+// use tokunigram
+//
+// fn main() [io]
+//     println("${tokunigram.piece("▁the", 0.0 - 3.5).score}")
+// ```
+pub struct TokPiece
+    // The piece's text, with spaces already written as `▁`.
+    text: Str
+    // Its LOG probability — a negative number, and larger (closer to
+    // zero) is more likely.  Log rather than probability so that
+    // scoring a segmentation is a sum rather than a product, which does
+    // not underflow on a long word.
+    score: Float
+
+// A SentencePiece unigram tokenizer.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [], 0)
+//     println("${u.unk_id}")
+// ```
+pub struct TokUnigram
+    // The pieces and their ids.
+    vocab: TokVocab
+    // The score of the piece with each id, in id order.  Parallel to the
+    // vocabulary rather than inside it, because the other two models
+    // have no scores and `TokVocab` is shared by all three.
+    scores: [Float]
+    // The id of `<unk>`.  Used when a byte cannot be covered and
+    // `byte_fallback` is off.
+    unk_id: Int
+    // Whether the model carries the 256 `<0xNN>` tokens and falls back
+    // to them.  When it does, the tokenizer is lossless; when it does
+    // not, unknown bytes become one `<unk>` and are gone.
+    byte_fallback: Bool
+    // Whether a `▁` is added at the start of the text before
+    // segmenting.  SentencePiece's `add_dummy_prefix`, on by default —
+    // which is why `"hello"` and `" hello"` usually tokenise the same.
+    add_dummy_prefix: Bool
+
+// A unigram tokenizer from pieces and scores.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0], 0).unk_id}")
+// ```
+pub fn of_pieces(vocab: TokVocab, scores: [Float], unk_id: Int) -> TokUnigram
+    todo("tokenizers-nv.tokunigram.of_pieces")
+
+// A unigram tokenizer from a `tokenizer.json`'s `model.vocab` array:
+// `[["piece", score], …]`, id = position.
+//
+// The form a HuggingFace-converted SentencePiece model arrives in, and
+// the one a caller who downloaded `tokenizer.json` already holds.
+// `TokMissingScore` for an entry with no score, because segmentation
+// maximises over scores and defaulting one would change the answer
+// silently.
+//
+// ```novo
+// use tokunigram
+//
+// fn main() [io]
+//     match tokunigram.of_json_pieces("[[\"a\", -1.0]]", 0)
+//         Ok(u)  => println("${u.unk_id}")
+//         Err(_) => println("refused")
+// ```
+pub fn of_json_pieces(json: Str, unk_id: Int) -> Result<TokUnigram, TokFault>
+    todo("tokenizers-nv.tokunigram.of_json_pieces")
+
+// A piece and its score.
+//
+// ```novo
+// use tokunigram
+//
+// fn main() [io]
+//     println(tokunigram.piece("▁the", 0.0 - 3.5).text)
+// ```
+pub fn piece(text: Str, score: Float) -> TokPiece
+    todo("tokenizers-nv.tokunigram.piece")
+
+// The same tokenizer with byte fallback on or off.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0], 0)
+//     println("${tokunigram.with_byte_fallback(u, true).byte_fallback}")
+// ```
+pub fn with_byte_fallback(u: TokUnigram, on: Bool) -> TokUnigram
+    todo("tokenizers-nv.tokunigram.with_byte_fallback")
+
+// The same tokenizer with the dummy prefix on or off.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0], 0)
+//     println("${tokunigram.with_dummy_prefix(u, false).add_dummy_prefix}")
+// ```
+pub fn with_dummy_prefix(u: TokUnigram, on: Bool) -> TokUnigram
+    todo("tokenizers-nv.tokunigram.with_dummy_prefix")
+
+// The score of a piece, or the most negative number when the vocabulary
+// has none.
+//
+// The sentinel rather than an optional, because this is the inner loop
+// of the Viterbi pass and "impossible" composes correctly with `max`:
+// a path through a piece that does not exist never wins.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0 - 1.0], 0)
+//     println("${tokunigram.score_of(u, "a")}")
+// ```
+pub fn score_of(u: TokUnigram, piece: Str) -> Float
+    todo("tokenizers-nv.tokunigram.score_of")
+
+// Text with every space written as `▁` and, if asked, one added at the
+// start.
+//
+// SentencePiece's normalisation, as its own function because it is the
+// step that decides whether `"hello"` and `" hello"` tokenise the same —
+// and because a caller comparing this package against the reference
+// compares this first.
+//
+// ```novo
+// use tokunigram
+//
+// fn main() [io]
+//     println(tokunigram.to_sentencepiece_space("hello world", true))
+// ```
+pub fn to_sentencepiece_space(text: Str, add_dummy_prefix: Bool) -> Str
+    todo("tokenizers-nv.tokunigram.to_sentencepiece_space")
+
+// A `▁`-spaced string back to ordinary text.
+//
+// Every `▁` becomes a space, and a single LEADING one is dropped —
+// which is the rule that makes `decode(encode(s))` give back `s` rather
+// than `" " + s` when the dummy prefix was added.
+//
+// ```novo
+// use tokunigram
+//
+// fn main() [io]
+//     println(tokunigram.from_sentencepiece_space("▁hello▁world"))
+// ```
+pub fn from_sentencepiece_space(text: Str) -> Str
+    todo("tokenizers-nv.tokunigram.from_sentencepiece_space")
+
+// The best segmentation of one `▁`-spaced string, as pieces.
+//
+// THE VITERBI PASS, public because it is the algorithm and the thing to
+// test: a segmentation that differs from the reference's differs here,
+// and comparing pieces is a readable diff where comparing ids is not.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0 - 1.0], 0)
+//     println("${list.len(tokunigram.best_path(u, "▁hello"))}")
+// ```
+pub fn best_path(u: TokUnigram, text: Str) -> [Str]
+    todo("tokenizers-nv.tokunigram.best_path")
+
+// The score the best segmentation achieves: the sum of its pieces' log
+// probabilities.
+//
+// Comparable ACROSS SEGMENTATIONS of the same text and not across
+// different texts — a longer string has more pieces and so a more
+// negative sum, which says nothing about how well it was tokenised.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0 - 1.0], 0)
+//     println("${tokunigram.best_score(u, "▁hello")}")
+// ```
+pub fn best_score(u: TokUnigram, text: Str) -> Float
+    todo("tokenizers-nv.tokunigram.best_score")
+
+// Text as token ids.
+//
+// Total when `byte_fallback` is on.  With it off, bytes no piece covers
+// become one `<unk>` each and are not recoverable — which is the older
+// SentencePiece behaviour and the reason `byte_fallback` is a field
+// rather than an assumption.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0 - 1.0], 0)
+//     println("${list.len(tokunigram.encode(u, "hello"))}")
+// ```
+pub fn encode(u: TokUnigram, text: Str) -> [Int]
+    todo("tokenizers-nv.tokunigram.encode")
+
+// Text as token strings, `▁` and all.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0 - 1.0], 0)
+//     println("${list.len(tokunigram.tokenize(u, "hello"))}")
+// ```
+pub fn tokenize(u: TokUnigram, text: Str) -> [Str]
+    todo("tokenizers-nv.tokunigram.tokenize")
+
+// Token ids back to text, with `▁` turned back into spaces.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0 - 1.0], 0)
+//     match tokunigram.decode(u, [0])
+//         Ok(s)  => println(s)
+//         Err(_) => println("refused")
+// ```
+pub fn decode(u: TokUnigram, ids: [Int]) -> Result<Str, TokFault>
+    todo("tokenizers-nv.tokunigram.decode")

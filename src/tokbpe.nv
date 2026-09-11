@@ -1,0 +1,357 @@
+// tokbpe.nv — byte-level BPE, as GPT-2 does it.
+//
+// THREE THINGS MAKE IT "BYTE-LEVEL", and every one of them is a place
+// implementations diverge:
+//
+//   1. **The alphabet is the 256 byte values**, so there is no
+//      out-of-vocabulary input.  Any bytes at all encode to something
+//      and decode back to exactly those bytes.  That is the property
+//      GPT-2 bought by leaving characters behind, and it is why a
+//      byte-level tokenizer never needs an unk token.
+//   2. **The bytes are mapped to printable code points** before merging,
+//      so a vocabulary file is text a person can read.  Byte 0x20 is
+//      written `Ġ`, 0x0A is `Ċ`.  The map is a BIJECTION over all 256
+//      values, which is what makes it reversible — and `byte_map` builds
+//      it here rather than reading it from anywhere, because a map read
+//      from a file could be wrong and one built from the rule cannot be.
+//   3. **Merges are ranked, and the lowest rank wins.**  Not the
+//      longest match, not the first: BPE repeatedly merges whichever
+//      ADJACENT PAIR has the lowest rank in the merges table, until no
+//      pair in the word has one.  Getting that wrong produces plausible
+//      tokens that are not the model's tokens, and the model then reads
+//      them as different words.
+//
+// THE HEX SHORTCUT, and why this package does not take it.  Because the
+// byte-to-unicode map is a bijection, BPE over the mapped code points is
+// EQUIVALENT to BPE over the raw bytes — so an implementation can skip
+// the map entirely if it converts the vocabulary and the merges into a
+// byte space first.  `orbit/ml` does exactly that and pays for it with a
+// Python script (`tools/gen_tokenizer_files.py`) that has to be run once
+// per checkpoint, files that a fresh HuggingFace clone does not have, and
+// a failure mode where an unconverted checkpoint loads an empty
+// vocabulary.  This package does the map natively, reads
+// `tokenizer.json` as it comes, and that preparation step disappears.
+//
+// PRE-TOKENIZATION IS A NAMED RULE, NOT A REGEX.  The reference
+// implementation splits with a Unicode regex before merging, and the
+// pattern is part of the model: GPT-2's and Llama 3's differ, and running
+// text through the wrong one produces different ids for the same string.
+// A regex engine is a dependency this package does not want and an
+// opaque answer this package does not want either, so the patterns are
+// written out as `TokPretokenRule` variants — each one documented as
+// what it splits on, each one testable on its own.
+//
+// NO EFFECTS.
+
+use tokvocab
+
+// One merge rule: two pieces that join, and how early.
+//
+// ```novo
+// use tokbpe
+//
+// fn main() [io]
+//     println(tokbpe.merge("Ġt", "he", 0).left)
+// ```
+pub struct TokMerge
+    // The left piece.
+    left: Str
+    // The right piece.
+    right: Str
+    // Its position in the merges file, counting from zero.  LOWER WINS:
+    // BPE merges the lowest-ranked pair present in the word, which is
+    // the pair the training saw most often.
+    rank: Int
+
+// How text is split before any merging.
+//
+// PART OF THE MODEL, not a preference.  Two models with the same
+// vocabulary and different pre-tokenizers produce different ids for the
+// same string, so this travels with the merges rather than beside them.
+//
+// ```novo
+// use tokbpe
+//
+// fn main() [io]
+//     println("${list.len(tokbpe.pretokenize(TokPretokenGpt2, "hello world"))}")
+// ```
+pub enum TokPretokenRule
+    // GPT-2's pattern.  In words: the contractions `'s 't 're 've 'm
+    // 'll 'd`; then an optional single leading space with a run of
+    // letters; then an optional leading space with a run of digits;
+    // then an optional leading space with a run of anything that is
+    // neither; then a run of whitespace that is not followed by a
+    // non-space; then any remaining whitespace.  The optional leading
+    // space is why GPT-2 tokens so often begin with one.
+    TokPretokenGpt2
+    // Llama 3's, which is GPT-2's with two changes that matter: the
+    // contractions are matched case-insensitively, and a digit run is
+    // capped at THREE digits — so `1234` is two tokens rather than one
+    // and every number tokenises consistently regardless of length.
+    TokPretokenLlama3
+    // Qwen2's, in the cl100k family: case-insensitive contractions, and
+    // a digit run of exactly ONE digit.
+    TokPretokenQwen2
+    // Split on whitespace only, keeping it with the following word.
+    // The simple rule some older BPE models use.
+    TokPretokenWhitespace
+    // No splitting: merge over the whole input at once.  Correct only
+    // for a model trained that way, and slow on long text — BPE is
+    // quadratic in the length of what it merges over, which is the
+    // reason pre-tokenization exists at all.
+    TokPretokenNone
+
+// A byte-level BPE tokenizer.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let v = tokvocab.of_tokens(["a", "b"])
+//     println("${tokbpe.merge_count(tokbpe.of_parts(v, [], TokPretokenGpt2))}")
+// ```
+pub struct TokBpe
+    // The pieces and their ids.
+    vocab: TokVocab
+    // The merges, in file order.  Their index IS their rank.
+    merges: [TokMerge]
+    // The ranks, indexed the way `rank_of` searches them — the same
+    // sorted-permutation trick `TokVocab` uses, because the merge lookup
+    // happens once per adjacent pair per merge round and a linear scan
+    // over 50,000 merges inside that loop is the whole cost of the
+    // tokenizer.
+    sorted: [Int]
+    // How text is split before merging.
+    pretokenizer: TokPretokenRule
+    // Whether a leading space is added to the text before encoding.
+    // GPT-2's `add_prefix_space`, off by default; RoBERTa turns it on,
+    // and the ids differ when it does.
+    add_prefix_space: Bool
+
+// A BPE tokenizer from its parts.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let v = tokvocab.of_tokens(["a"])
+//     println("${tokbpe.merge_count(tokbpe.of_parts(v, [], TokPretokenGpt2))}")
+// ```
+pub fn of_parts(vocab: TokVocab, merges: [TokMerge], rule: TokPretokenRule) -> TokBpe
+    todo("tokenizers-nv.tokbpe.of_parts")
+
+// A BPE tokenizer from a `vocab.json`'s text and a `merges.txt`'s text.
+//
+// GPT-2's two-file format, as the two strings a caller holds.  The
+// first line of a merges file is a `#version:` comment and is skipped;
+// every other line is two pieces separated by a space, and its position
+// is its rank.
+//
+// ```novo
+// use tokbpe
+//
+// fn main() [io]
+//     match tokbpe.of_gpt2_files("{\"a\": 0}", "#version: 0.2\n", TokPretokenGpt2)
+//         Ok(b)  => println("${tokbpe.merge_count(b)}")
+//         Err(_) => println("refused")
+// ```
+pub fn of_gpt2_files(vocab_json: Str, merges_txt: Str,
+                     rule: TokPretokenRule) -> Result<TokBpe, TokFault>
+    todo("tokenizers-nv.tokbpe.of_gpt2_files")
+
+// A merge rule.
+//
+// ```novo
+// use tokbpe
+//
+// fn main() [io]
+//     println("${tokbpe.merge("Ġt", "he", 0).rank}")
+// ```
+pub fn merge(left: Str, right: Str, rank: Int) -> TokMerge
+    todo("tokenizers-nv.tokbpe.merge")
+
+// The same tokenizer with a leading space added before encoding.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     println("${tokbpe.with_prefix_space(b, true).add_prefix_space}")
+// ```
+pub fn with_prefix_space(b: TokBpe, add: Bool) -> TokBpe
+    todo("tokenizers-nv.tokbpe.with_prefix_space")
+
+// How many merges the table holds.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokbpe.merge_count(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))}")
+// ```
+pub fn merge_count(b: TokBpe) -> Int
+    todo("tokenizers-nv.tokbpe.merge_count")
+
+// The rank of the pair `left` `right`, or -1 when it is not a merge.
+//
+// The inner-loop lookup.  -1 rather than `?Int` for the same reason
+// `tokvocab.id_of` gives one: the caller is a comparison, not a `match`.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     println("${tokbpe.rank_of(b, "Ġt", "he")}")
+// ```
+pub fn rank_of(b: TokBpe, left: Str, right: Str) -> Int
+    todo("tokenizers-nv.tokbpe.rank_of")
+
+// The 256 byte values as the code points GPT-2 writes them as.
+//
+// BUILT FROM THE RULE, not read from anywhere: the 188 byte values that
+// are already printable ASCII or printable Latin-1 map to themselves,
+// and the other 68 map to the code points from 256 upward in order.
+// That rule is the whole definition, and building it here means the map
+// cannot be subtly wrong in a way a file's copy could be.
+//
+// Answers 256 strings, indexed by byte value.
+//
+// ```novo
+// use tokbpe
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokbpe.byte_map())}")
+// ```
+pub fn byte_map() -> [Str]
+    todo("tokenizers-nv.tokbpe.byte_map")
+
+// A byte string as the code points a BPE vocabulary is written in.
+//
+// The forward half of the map: raw bytes in, a vocabulary's alphabet
+// out.  Every encode starts here.
+//
+// ```novo
+// use tokbpe
+//
+// fn main() [io]
+//     println(tokbpe.bytes_to_alphabet(" the"))
+// ```
+pub fn bytes_to_alphabet(raw: Str) -> Str
+    todo("tokenizers-nv.tokbpe.bytes_to_alphabet")
+
+// A string in the vocabulary's alphabet back to raw bytes.
+//
+// The inverse, and it is EXACT: the map is a bijection, so any byte
+// sequence survives a round trip through it.  That is the property that
+// makes byte-level BPE lossless, and the property a test should assert
+// over all 256 values.  `TokBadByteMap` when the input holds a code
+// point the map never produces.
+//
+// ```novo
+// use tokbpe
+//
+// fn main() [io]
+//     match tokbpe.alphabet_to_bytes("Ġthe")
+//         Ok(s)  => println(s)
+//         Err(_) => println("refused")
+// ```
+pub fn alphabet_to_bytes(mapped: Str) -> Result<Str, TokFault>
+    todo("tokenizers-nv.tokbpe.alphabet_to_bytes")
+
+// The pieces a rule splits text into, before any merging.
+//
+// Public because it is the half that is easiest to get wrong and the
+// half a reference implementation's own test cases cover directly: a
+// caller comparing this package against `transformers` compares these
+// first, and a divergence here explains every divergence downstream.
+//
+// ```novo
+// use tokbpe
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokbpe.pretokenize(TokPretokenGpt2, "hello world"))}")
+// ```
+pub fn pretokenize(rule: TokPretokenRule, text: Str) -> [Str]
+    todo("tokenizers-nv.tokbpe.pretokenize")
+
+// One pre-token merged into its final pieces.
+//
+// The BPE loop itself, over a piece that has already been mapped into
+// the vocabulary's alphabet: repeatedly find the adjacent pair with the
+// lowest rank and join it, until no pair has one.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     println("${list.len(tokbpe.merge_word(b, "hello"))}")
+// ```
+pub fn merge_word(b: TokBpe, word: Str) -> [Str]
+    todo("tokenizers-nv.tokbpe.merge_word")
+
+// Text as token ids.
+//
+// TOTAL: there is no input this fails on, because the alphabet is every
+// byte.  A piece that survives merging and is still not in the
+// vocabulary is emitted as its single bytes, every one of which is.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     println("${list.len(tokbpe.encode(b, "hello"))}")
+// ```
+pub fn encode(b: TokBpe, text: Str) -> [Int]
+    todo("tokenizers-nv.tokbpe.encode")
+
+// Text as token strings, in the vocabulary's alphabet.
+//
+// What `encode` produced before the ids were looked up — for inspecting
+// a tokenisation, which is what a person does when a model behaves
+// strangely on a particular input.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     println("${list.len(tokbpe.tokenize(b, "hello"))}")
+// ```
+pub fn tokenize(b: TokBpe, text: Str) -> [Str]
+    todo("tokenizers-nv.tokbpe.tokenize")
+
+// Token ids back to text.
+//
+// Exact for anything `encode` produced.  `TokIdOutOfRange` for an id
+// the vocabulary does not have, which is what a caller sees when ids
+// and vocabulary came from different models.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     match tokbpe.decode(b, [0])
+//         Ok(s)  => println(s)
+//         Err(_) => println("refused")
+// ```
+pub fn decode(b: TokBpe, ids: [Int]) -> Result<Str, TokFault>
+    todo("tokenizers-nv.tokbpe.decode")

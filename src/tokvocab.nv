@@ -1,0 +1,264 @@
+// tokvocab.nv — the vocabulary, as a value the caller holds.
+//
+// NO FILE ANYWHERE IN THIS PACKAGE, and it is the constraint the whole
+// design answers.  Every reference implementation opens a path:
+// `Tokenizer.from_file`, `sp.Load("m.model")`, `BertTokenizer.from_pretrained`.
+// A `core` package may not, so the vocabulary arrives as text the caller
+// already has — `std.hf` downloads it, `fs.read` reads it, and this
+// package parses the value.
+//
+// What that buys is not only the budget.  The same tokenizer then runs
+// in a wasm notebook with the vocabulary fetched over HTTP, in a server
+// with it embedded in the binary, and beside a model on a device with it
+// in flash — three deployments that a `from_file` API serves in one.
+//
+// A VOCABULARY IS A LIST AND A LOOKUP, and both directions matter.
+// Id-to-token is an index read; token-to-id is a search.  The stdlib's
+// `WordPiece` holds only the list and scans it linearly, which is O(n)
+// per token against a 30,000-entry vocabulary — fine for a demo and not
+// for a chat loop.  `TokVocab` carries the index alongside, built once at
+// load, which is the difference between the two and the reason this type
+// exists rather than a bare `[Str]`.
+//
+// BYTES, NOT CHARACTERS.  A token is a byte string.  GPT-2's vocabulary
+// looks like text because its byte-level map is a bijection onto
+// printable code points, and treating those as characters is where a
+// tokenizer stops round-tripping — see `tokbpe`'s header.  Every `Str`
+// here is a sequence of bytes and nothing in this module decodes UTF-8.
+//
+// NO EFFECTS.
+
+// A token the caller added on top of the model's own vocabulary.
+//
+// The mechanism a chat template uses: `<|im_start|>` is not something
+// BPE would ever produce by merging, it has to match literally and
+// before anything else, and it has an id outside the model's range.
+// Every reference implementation has this concept and calls it
+// `added_tokens`.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println(tokvocab.added("<|endoftext|>", 50256, true).content)
+// ```
+pub struct TokAddedToken
+    // The literal text it matches.
+    content: Str
+    // The id it encodes to.
+    id: Int
+    // Whether it is matched before the normal pipeline.  A SPECIAL added
+    // token is matched literally and never split; a non-special one is
+    // added to the vocabulary and can still be produced by merging.
+    special: Bool
+    // Whether a single space on either side of it is eaten.  What a chat
+    // template needs so that `"<|user|> hello"` does not tokenise a
+    // leading space.
+    strip_spaces: Bool
+
+// A vocabulary: the tokens, both directions, and what was added on top.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.size(tokvocab.of_tokens(["a", "b"]))}")
+// ```
+pub struct TokVocab
+    // Token at index i has id i.  The id-to-token direction, and an
+    // index read.
+    tokens: [Str]
+    // The sorted permutation of `tokens` by byte order, as indices.  The
+    // token-to-id direction: a binary search over this is
+    // O(log n) instead of the linear scan a bare list forces, which is
+    // the difference between a tokenizer that keeps up with a chat loop
+    // and one that does not.  Built once by every constructor here, so a
+    // caller never has to remember to.
+    sorted: [Int]
+    // Tokens added on top of the model's own, matched before it.
+    added: [TokAddedToken]
+
+// A vocabulary from a list of tokens, id = index.
+//
+// The shape a `vocab.txt` has after splitting, and the one a caller who
+// built a vocabulary itself already holds.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.size(tokvocab.of_tokens(["a", "b"]))}")
+// ```
+pub fn of_tokens(tokens: [Str]) -> TokVocab
+    todo("tokenizers-nv.tokvocab.of_tokens")
+
+// A vocabulary from the TEXT of a `vocab.txt`: one token per line, id =
+// line number.
+//
+// BERT's format, and the one the stdlib's `WordPiece.from_vocab` takes.
+// Blank lines are kept, because a blank line in a BERT vocabulary is a
+// real token with a real id and dropping it shifts every id after it.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.size(tokvocab.of_lines("[PAD]\n[UNK]\nhello"))}")
+// ```
+pub fn of_lines(text: Str) -> TokVocab
+    todo("tokenizers-nv.tokvocab.of_lines")
+
+// A vocabulary from a `{"token": id}` JSON object's text.
+//
+// GPT-2's `vocab.json`, and the `model.vocab` member of a
+// `tokenizer.json`.  The ids are taken as written rather than assumed
+// to be dense: `TokBadVocabEntry` for a negative one, a duplicate, or a
+// gap that would leave a hole the decoder could land in.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     match tokvocab.of_json_object("{\"a\": 0, \"b\": 1}")
+//         Ok(v)  => println("${tokvocab.size(v)}")
+//         Err(_) => println("refused")
+// ```
+pub fn of_json_object(text: Str) -> Result<TokVocab, TokFault>
+    todo("tokenizers-nv.tokvocab.of_json_object")
+
+// The same vocabulary with added tokens on top.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     let v = tokvocab.of_tokens(["a"])
+//     println("${list.len(tokvocab.with_added(v, []).added)}")
+// ```
+pub fn with_added(v: TokVocab, added: [TokAddedToken]) -> TokVocab
+    todo("tokenizers-nv.tokvocab.with_added")
+
+// An added token.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.added("<|endoftext|>", 50256, true).id}")
+// ```
+pub fn added(content: Str, id: Int, special: Bool) -> TokAddedToken
+    todo("tokenizers-nv.tokvocab.added")
+
+// How many tokens the vocabulary has, added ones included.
+//
+// The number a model's embedding table has to match, so it is the one a
+// caller checks before loading weights.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.size(tokvocab.of_tokens(["a", "b"]))}")
+// ```
+pub fn size(v: TokVocab) -> Int
+    todo("tokenizers-nv.tokvocab.size")
+
+// The id of a token, or -1 when the vocabulary has none.
+//
+// A binary search over `sorted`, not a scan.  -1 rather than `?Int`
+// because the caller is almost always a loop that has an unk id ready,
+// and `id_of(v, t) ?? unk` reads no better than the comparison while
+// costing an optional per token.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.id_of(tokvocab.of_tokens(["a", "b"]), "b")}")
+// ```
+pub fn id_of(v: TokVocab, token: Str) -> Int
+    todo("tokenizers-nv.tokvocab.id_of")
+
+// The token an id names, or `""` when the id is outside the vocabulary.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println(tokvocab.token_of(tokvocab.of_tokens(["a", "b"]), 1))
+// ```
+pub fn token_of(v: TokVocab, id: Int) -> Str
+    todo("tokenizers-nv.tokvocab.token_of")
+
+// Whether the vocabulary has this token.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.has(tokvocab.of_tokens(["a"]), "a")}")
+// ```
+pub fn has(v: TokVocab, token: Str) -> Bool
+    todo("tokenizers-nv.tokvocab.has")
+
+// The longest token in the vocabulary that is a prefix of `text` at
+// `from`, and its id.
+//
+// THE PRIMITIVE UNDER WORDPIECE AND UNDER ADDED-TOKEN MATCHING, and the
+// reason it is here rather than in either: both need exactly this, and
+// an implementation that wrote it twice would get the tie-breaking
+// different in one of them.  Answers `("", -1)` when nothing matches.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     let (tok, id) = tokvocab.longest_prefix(tokvocab.of_tokens(["a", "ab"]), "abc", 0)
+//     println("${tok} ${id}")
+// ```
+pub fn longest_prefix(v: TokVocab, text: Str, from: Int) -> (Str, Int)
+    todo("tokenizers-nv.tokvocab.longest_prefix")
+
+// The added token matching `text` at `from`, longest first, and its id.
+//
+// LONGEST FIRST IS THE RULE, because `<|im_start|>` and `<|im_start|>x`
+// can both be added tokens and matching the shorter one first would
+// split the longer.  Answers `("", -1)` when none matches.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     let v = tokvocab.of_tokens(["a"])
+//     let (tok, id) = tokvocab.match_added(v, "hello", 0)
+//     println("${tok} ${id}")
+// ```
+pub fn match_added(v: TokVocab, text: Str, from: Int) -> (Str, Int)
+    todo("tokenizers-nv.tokvocab.match_added")
+
+// Every token in the vocabulary, in id order.
+//
+// ```novo
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokvocab.tokens_of(tokvocab.of_tokens(["a"])))}")
+// ```
+pub fn tokens_of(v: TokVocab) -> [Str]
+    todo("tokenizers-nv.tokvocab.tokens_of")
+
+// Whether every id from 0 to `size - 1` names a token.
+//
+// The check `of_json_object` makes: a vocabulary with a hole in it has
+// an id a model can generate and this package cannot decode, and finding
+// that out at load time rather than mid-conversation is the difference.
+//
+// ```novo
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokvocab.is_dense(tokvocab.of_tokens(["a", "b"]))}")
+// ```
+pub fn is_dense(v: TokVocab) -> Bool
+    todo("tokenizers-nv.tokvocab.is_dense")

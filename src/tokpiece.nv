@@ -1,0 +1,303 @@
+// tokpiece.nv — WordPiece, generalised.
+//
+// THE SIMPLEST OF THE THREE: split into words, then take the longest
+// vocabulary entry that is a prefix of what is left, prefixing every
+// piece after the first with `##`.  If any piece of a word cannot be
+// matched, the WHOLE WORD becomes one unk token — not the pieces that
+// did match, the whole word.  That last rule is the one implementations
+// get wrong, and it is why `encode` cannot be written as a simple loop
+// that emits as it goes.
+//
+// WHY IT IS HERE AT ALL, given that `compiler/stdlib/wordpiece.nv`
+// exists.  The stdlib's `WordPiece` is BERT-uncased and nothing else: it
+// lowercases unconditionally, it is ASCII-only so every accented word
+// tokenises as unknown, its continuation prefix is `##` with no way to
+// change it, its unk id defaults to 100 rather than being read from the
+// vocabulary, and `encode` wraps the result in `[CLS]` and `[SEP]`
+// whether the caller wanted that or not.  Every one of those is right
+// for BERT and wrong for the next model.
+//
+// So this is the general one: the prefix is a field, the unk token is a
+// field, the wrapping is the caller's, normalisation is a named rule
+// rather than an assumption, and the result is the same `TokEncoding`
+// the other two models return — which is the whole point of having a
+// family behind one enum.  The README says what happens to the stdlib
+// one.
+//
+// NORMALISATION IS A NAMED RULE.  BERT's preprocessing is four separate
+// decisions — lowercase, strip accents, split on punctuation, split on
+// Chinese characters — and models mix them: BERT-uncased does all four,
+// BERT-cased does the last two, and a domain model may do none.  Folding
+// them into one boolean, as most implementations do, makes two of those
+// three unreachable.
+//
+// NO EFFECTS.
+
+use tokvocab
+
+// How text is normalised before it is split into words.
+//
+// FOUR INDEPENDENT DECISIONS, not one switch, because models mix them.
+//
+// ```novo
+// use tokpiece
+//
+// fn main() [io]
+//     println(tokpiece.normalize(tokpiece.bert_uncased_rules(), "Héllo"))
+// ```
+pub struct TokNormalizer
+    // Map every byte of an ASCII letter to lower case.  BERT-uncased
+    // does; BERT-cased does not.
+    lowercase: Bool
+    // Decompose and drop combining marks, so `é` becomes `e`.  Needs
+    // Unicode decomposition, which is the one piece of real Unicode
+    // work in this package — and the reason it is a FIELD is that a
+    // model that does not do it must not pay for it.
+    strip_accents: Bool
+    // Put every punctuation character in a word of its own.
+    split_punctuation: Bool
+    // Put every CJK ideograph in a word of its own, which is how BERT
+    // handles Chinese without a word segmenter.
+    split_cjk: Bool
+    // Replace runs of whitespace with one space and trim the ends.
+    clean_whitespace: Bool
+
+// A WordPiece tokenizer.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a"]), 0)
+//     println(w.continuation)
+// ```
+pub struct TokWordPiece
+    // The pieces and their ids.
+    vocab: TokVocab
+    // What every piece after the first in a word is prefixed with.
+    // `"##"` for BERT — a FIELD because it is not universal, and a
+    // tokenizer whose model writes `▁` at the START of the first piece
+    // instead is the same algorithm with a different marker.
+    continuation: Str
+    // The id emitted for a word that cannot be fully matched.
+    unk_id: Int
+    // How text is normalised first.
+    normalizer: TokNormalizer
+    // The longest a single word may be before it is replaced by unk
+    // without being looked at.  BERT's `max_input_chars_per_word`,
+    // default 100: it stops a pathological input — a thousand-character
+    // token from a minified file — from costing quadratic time in the
+    // longest-prefix search.
+
+    max_word_len: Int
+
+// A WordPiece tokenizer over a vocabulary, with BERT's defaults.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+//
+// fn main() [io]
+//     println("${tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]"]), 0).max_word_len}")
+// ```
+pub fn of_vocab(vocab: TokVocab, unk_id: Int) -> TokWordPiece
+    todo("tokenizers-nv.tokpiece.of_vocab")
+
+// A WordPiece tokenizer from a `vocab.txt`'s TEXT, with the unk id
+// looked up rather than assumed.
+//
+// The call that replaces `WordPiece.from_vocab`, and the difference is
+// the last clause: the stdlib's version defaults `unk_id` to 100 and
+// only then looks for `[UNK]`, so a vocabulary that puts it elsewhere
+// and has fewer than 101 entries gets a wrong id with no complaint.
+//
+// ```novo
+// use tokpiece
+//
+// fn main() [io]
+//     match tokpiece.of_vocab_text("[PAD]\n[UNK]\nhello", "[UNK]")
+//         Ok(w)  => println("${w.unk_id}")
+//         Err(_) => println("refused")
+// ```
+pub fn of_vocab_text(text: Str, unk_token: Str) -> Result<TokWordPiece, TokFault>
+    todo("tokenizers-nv.tokpiece.of_vocab_text")
+
+// BERT-uncased's four rules: lowercase, strip accents, split punctuation
+// and CJK, clean whitespace.
+//
+// ```novo
+// use tokpiece
+//
+// fn main() [io]
+//     println("${tokpiece.bert_uncased_rules().lowercase}")
+// ```
+pub fn bert_uncased_rules() -> TokNormalizer
+    todo("tokenizers-nv.tokpiece.bert_uncased_rules")
+
+// BERT-cased's: the splitting and the whitespace cleaning, and neither
+// of the two that change letters.
+//
+// ```novo
+// use tokpiece
+//
+// fn main() [io]
+//     println("${tokpiece.bert_cased_rules().lowercase}")
+// ```
+pub fn bert_cased_rules() -> TokNormalizer
+    todo("tokenizers-nv.tokpiece.bert_cased_rules")
+
+// No normalisation at all: the text is split on whitespace and nothing
+// else.
+//
+// ```novo
+// use tokpiece
+//
+// fn main() [io]
+//     println("${tokpiece.no_normalization().split_punctuation}")
+// ```
+pub fn no_normalization() -> TokNormalizer
+    todo("tokenizers-nv.tokpiece.no_normalization")
+
+// The same tokenizer with a different continuation prefix.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]"]), 0)
+//     println(tokpiece.with_continuation(w, "▁").continuation)
+// ```
+pub fn with_continuation(w: TokWordPiece, prefix: Str) -> TokWordPiece
+    todo("tokenizers-nv.tokpiece.with_continuation")
+
+// The same tokenizer with different normalisation rules.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]"]), 0)
+//     println("${tokpiece.with_normalizer(w, tokpiece.bert_cased_rules()).normalizer.lowercase}")
+// ```
+pub fn with_normalizer(w: TokWordPiece, n: TokNormalizer) -> TokWordPiece
+    todo("tokenizers-nv.tokpiece.with_normalizer")
+
+// The same tokenizer with a different maximum word length.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]"]), 0)
+//     println("${tokpiece.with_max_word_len(w, 200).max_word_len}")
+// ```
+pub fn with_max_word_len(w: TokWordPiece, n: Int) -> TokWordPiece
+    todo("tokenizers-nv.tokpiece.with_max_word_len")
+
+// Text with the normaliser's rules applied.
+//
+// Public because it is the step a caller compares against the reference
+// first: a divergence here explains every divergence downstream, and
+// comparing normalised text is a readable diff where comparing ids is
+// not.
+//
+// ```novo
+// use tokpiece
+//
+// fn main() [io]
+//     println(tokpiece.normalize(tokpiece.bert_uncased_rules(), "Héllo"))
+// ```
+pub fn normalize(n: TokNormalizer, text: Str) -> Str
+    todo("tokenizers-nv.tokpiece.normalize")
+
+// Normalised text split into the words WordPiece then works on.
+//
+// ```novo
+// use tokpiece
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokpiece.split_words(tokpiece.bert_uncased_rules(), "a, b"))}")
+// ```
+pub fn split_words(n: TokNormalizer, text: Str) -> [Str]
+    todo("tokenizers-nv.tokpiece.split_words")
+
+// One word as its pieces, or a single unk token.
+//
+// ALL OR NOTHING, and this is the rule worth testing: a word that
+// matches for three pieces and then cannot be continued does NOT produce
+// those three pieces and an unk.  It produces one unk.  An
+// implementation that emits as it goes cannot express that, which is why
+// this is a function over a whole word rather than a loop in `encode`.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a"]), 0)
+//     println("${list.len(tokpiece.piece_word(w, "a"))}")
+// ```
+pub fn piece_word(w: TokWordPiece, word: Str) -> [Str]
+    todo("tokenizers-nv.tokpiece.piece_word")
+
+// Text as token ids.
+//
+// NO `[CLS]` AND NO `[SEP]`.  The stdlib's version wraps
+// unconditionally; this one does not, because wrapping is a property of
+// how a model is being USED — a sentence-pair classifier, a single-text
+// encoder, an embedding call — and not of the tokenizer.
+// `tokmodel.encode` applies a `TokSpecials` template when the caller
+// asks for one.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a"]), 0)
+//     println("${list.len(tokpiece.encode(w, "a"))}")
+// ```
+pub fn encode(w: TokWordPiece, text: Str) -> [Int]
+    todo("tokenizers-nv.tokpiece.encode")
+
+// Text as token strings, `##` and all.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a"]), 0)
+//     println("${list.len(tokpiece.tokenize(w, "a"))}")
+// ```
+pub fn tokenize(w: TokWordPiece, text: Str) -> [Str]
+    todo("tokenizers-nv.tokpiece.tokenize")
+
+// Token ids back to text.
+//
+// LOSSY, AND SAYS SO: WordPiece throws away the normalisation, so
+// decoding gives back lowercased, accent-stripped text with a space
+// before every punctuation mark that was split out.  That is not a
+// defect to fix — the information is gone at `normalize` — and it is why
+// WordPiece is used for classification and not for generation.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a"]), 0)
+//     match tokpiece.decode(w, [1])
+//         Ok(s)  => println(s)
+//         Err(_) => println("refused")
+// ```
+pub fn decode(w: TokWordPiece, ids: [Int]) -> Result<Str, TokFault>
+    todo("tokenizers-nv.tokpiece.decode")

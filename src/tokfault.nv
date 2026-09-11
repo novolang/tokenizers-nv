@@ -1,0 +1,91 @@
+// tokfault.nv — what loading or running a tokenizer can go wrong on.
+//
+// ENCODING NEVER FAILS, and that is the design rather than an accident.
+// A tokenizer's whole job is to turn any text at all into ids, and every
+// model in this package has a total answer for text it has not seen: BPE
+// falls back to single bytes, unigram falls back to bytes or to its unk
+// piece, WordPiece emits its unk token.  A caller feeding a chat message
+// into a model should never have to handle a failure from the step
+// before the model.
+//
+// WHAT DOES FAIL IS LOADING.  A vocabulary that is not what it claims to
+// be — truncated JSON, a merges line that is not two pieces, an id that
+// is out of range — is a failure the caller can act on, at the moment
+// they can still choose a different file.
+//
+// DECODING FAILS IN EXACTLY ONE WAY: an id no vocabulary has.  That is
+// worth separating from the rest because it means the ids and the
+// vocabulary came from different models, which is a mistake with a
+// specific fix.
+//
+// NO EFFECTS.
+
+// What loading or decoding can go wrong on.
+//
+// ```novo
+// use tokfault
+//
+// fn main() [io]
+//     println("${tokfault.is_load_error(TokIdOutOfRange(9, 8))}")
+// ```
+pub enum TokFault
+    // A `tokenizer.json` that is not well-formed JSON, or is JSON
+    // without the shape a tokenizer has.
+    TokMalformedJson(offset: Int, what: Str)
+    // A `tokenizer.json` whose `model.type` is not one this package
+    // implements.  Names what was found, so the message can say which
+    // three are.
+    TokUnknownModel(found: Str)
+    // A merges table line that is not two pieces separated by a space.
+    TokMalformedMerge(line: Int, found: Str)
+    // A vocabulary entry whose id is negative, or beyond the number of
+    // entries, or shared with another token.
+    TokBadVocabEntry(token: Str, id: Int)
+    // A unigram vocabulary entry with no score, or a score that is not a
+    // number.  Unigram segmentation is a maximisation over scores, so a
+    // missing one is not something to default.
+    TokMissingScore(piece: Str)
+    // An id handed to `decode` that no vocabulary entry has.  Almost
+    // always ids and a vocabulary from different models.
+    TokIdOutOfRange(id: Int, vocab_size: Int)
+    // A byte-level model whose byte-to-unicode map is not a bijection
+    // over the 256 byte values, so decoding could not be exact.
+    TokBadByteMap(what: Str)
+
+// The rule every `TokFault` is printed by: say what was expected, quote
+// what was found, and name the place in the input.
+//
+// `Result<T, E>` requires `E: Error` (SPEC § 3.4), so this impl is what
+// makes every fallible signature in the package spellable.
+impl Error for TokFault
+    fn message(self) -> Str
+        match self
+            TokMalformedJson(at, what)     =>
+                "the tokenizer JSON is not ${what} at byte ${at}"
+            TokUnknownModel(found)         =>
+                "model type '${found}' is not one of BPE, Unigram or WordPiece"
+            TokMalformedMerge(line, found) =>
+                "merges line ${line}, '${found}', is not two pieces"
+            TokBadVocabEntry(token, id)    =>
+                "the vocabulary gives '${token}' the id ${id}"
+            TokMissingScore(piece)         =>
+                "the unigram piece '${piece}' has no score, and segmentation maximises over scores"
+            TokIdOutOfRange(id, size)      =>
+                "id ${id} is outside a vocabulary of ${size} — these ids and this vocabulary are probably from different models"
+            TokBadByteMap(what)            =>
+                "the byte-level map is not a bijection: ${what}"
+
+// Whether the fault happened while LOADING rather than while decoding.
+//
+// The distinction a caller acts on: a load failure means choose a
+// different file, and a decode failure means the ids and the vocabulary
+// do not belong together.
+//
+// ```novo
+// use tokfault
+//
+// fn main() [io]
+//     println("${tokfault.is_load_error(TokUnknownModel("Foo"))}")
+// ```
+pub fn is_load_error(f: TokFault) -> Bool
+    todo("tokenizers-nv.tokfault.is_load_error")

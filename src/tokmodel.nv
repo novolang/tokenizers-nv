@@ -1,0 +1,473 @@
+// tokmodel.nv — the three models behind one type, and the encode and
+// decode every caller actually uses.
+//
+// AN ENUM, NOT A TRAIT, and the argument is worth writing out because
+// "behind one trait" is the shape this would take in most languages.
+//
+// THE DECIDING REASON IS THAT THE KIND IS DATA.  A `tokenizer.json` says
+// `"model": {"type": "BPE"}`, and which of the three a program is
+// holding is read out of that file at run time.  A trait bound —
+// `fn encode<T: Tokenizer>(t: T, …)` — is resolved at COMPILE time, so
+// it cannot express "whatever this file turns out to say".  Expressing
+// that needs a trait OBJECT, and a `dyn Trait` is a boxed dispatch a
+// `core` package cannot afford.  An enum makes the run-time choice a
+// `match`, which is exactly what it is.
+//
+// TWO MORE REASONS, either of which would have been enough on its own:
+//
+//   - SPEC §3.6's grammar is `trait_bound ::= TYPE_IDENT [ '[' ident ']' ]`
+//     — a bound carries an EFFECT argument and never a type argument.
+//     proptest-core-nv found this and reshaped around it.  Anything that
+//     wanted to be generic over the vocabulary representation as well as
+//     the model could not be spelled at all.
+//   - A generic function whose return type applies a generic head is not
+//     emitted for a cross-module call on this toolchain, and a library
+//     is nothing but cross-module calls.  proptest-core-nv's
+//     `strategy_tests.nv` does not compile for exactly that reason.
+//
+// WHAT THE ENUM COSTS is that a fourth model — a character tokenizer, a
+// regex one — is a variant here and a branch in six functions, rather
+// than an impl somebody writes in their own package.  For a family whose
+// membership is set by what the reference implementation supports, that
+// is the right trade; if it stops being, the shape to move to is a
+// trait with the enum kept as the `dyn`-free fast path.
+//
+// ONE ENCODING TYPE FOR ALL THREE, and that is the point of the family.
+// A caller writes one function that takes a `TokModel` and works
+// whichever model the file turned out to hold — which is what a serving
+// loop, an embedding call and a notebook cell all need.
+//
+// NO EFFECTS.  Not one function in this package opens anything.
+
+use tokvocab
+use tokspecial
+use tokbpe
+use tokpiece
+
+// One of the three tokenizers.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     println(tokmodel.model_name(TokBpeModel(b)))
+// ```
+pub enum TokModel
+    // Byte-level BPE, as GPT-2, Llama and Qwen use it.
+    TokBpeModel(bpe: TokBpe)
+    // SentencePiece unigram, as T5, ALBERT and the Gemma family use it.
+    TokUnigramModel(unigram: TokUnigram)
+    // WordPiece, as BERT and its descendants use it.
+    TokWordPieceModel(wordpiece: TokWordPiece)
+
+// What encoding a piece of text produced.
+//
+// MORE THAN A LIST OF IDS, and every field earns its place with a caller
+// that needs it: the tokens for inspection, the offsets for
+// highlighting, the type ids for a pair model, the attention mask for a
+// padded batch.  Building them all at once costs one pass; asking for
+// them separately would cost four.
+//
+// ```novo
+// use tokmodel
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokmodel.empty_encoding().ids)}")
+// ```
+pub struct TokEncoding
+    // The ids the model reads.  The field almost every caller wants.
+    ids: [Int]
+    // The token strings those ids name, in the model's own alphabet —
+    // `Ġthe`, `▁the`, `##ing`.  For showing a person how their text was
+    // split, which is what they ask for when a model behaves oddly.
+    tokens: [Str]
+    // Where each token starts in the ORIGINAL text, in bytes.  The one a
+    // caller highlighting a model's attention needs, and the one that is
+    // hard to reconstruct afterwards because normalisation moved
+    // everything.  A token a template added has the offset of the
+    // sequence boundary it sits at.
+    offsets: [Int]
+    // How long each token's span in the original text is, in bytes.  0
+    // for a token the template added, which is how a caller tells those
+    // apart without comparing ids against `TokSpecials`.
+    lengths: [Int]
+    // Which sequence each token came from: 0 for the first, 1 for the
+    // second in a pair.  What BERT's `token_type_ids` is.
+    type_ids: [Int]
+    // 1 for a real token and 0 for padding.  All ones until `padded`
+    // adds some, so a caller batching can always read this field.
+    attention_mask: [Int]
+
+// An encoding with nothing in it.
+//
+// ```novo
+// use tokmodel
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokmodel.empty_encoding().ids)}")
+// ```
+pub fn empty_encoding() -> TokEncoding
+    todo("tokenizers-nv.tokmodel.empty_encoding")
+
+// A tokenizer from the TEXT of a `tokenizer.json`.
+//
+// THE CALL THIS PACKAGE EXISTS FOR.  `std.hf` downloads the file, the
+// caller reads it, and this reads `model.type` and builds whichever of
+// the three it names — which is the run-time choice the header's
+// argument is about.  `TokUnknownModel` for a type that is none of them.
+//
+// It also reads `added_tokens`, so a chat model's role markers come with
+// it and a caller does not have to know their names.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     match tokmodel.of_tokenizer_json("{}")
+//         Ok(m)  => println(tokmodel.model_name(m))
+//         Err(_) => println("refused")
+// ```
+pub fn of_tokenizer_json(text: Str) -> Result<TokModel, TokFault>
+    todo("tokenizers-nv.tokmodel.of_tokenizer_json")
+
+// The specials a `tokenizer.json`'s text describes.
+//
+// Separate from `of_tokenizer_json` because a `TokModel` does not carry
+// them: the same model is used with different wrapping for different
+// tasks, and binding the roles into the model would make that a
+// different model.
+//
+// ```novo
+// use tokmodel
+//
+// fn main() [io]
+//     match tokmodel.specials_of_tokenizer_json("{}")
+//         Ok(s)  => println("${s.eos_id}")
+//         Err(_) => println("refused")
+// ```
+pub fn specials_of_tokenizer_json(text: Str) -> Result<TokSpecials, TokFault>
+    todo("tokenizers-nv.tokmodel.specials_of_tokenizer_json")
+
+// Which of the three this is: `"BPE"`, `"Unigram"` or `"WordPiece"`.
+//
+// The same three spellings `tokenizer.json` uses, so a round trip
+// through a manifest names the same thing.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println(tokmodel.model_name(m))
+// ```
+pub fn model_name(m: TokModel) -> Str
+    todo("tokenizers-nv.tokmodel.model_name")
+
+// The vocabulary a model holds.
+//
+// One accessor over the three, so a caller checking the vocabulary size
+// against a model's embedding table does not match on the kind.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println("${tokvocab.size(tokmodel.vocab_of(m))}")
+// ```
+pub fn vocab_of(m: TokModel) -> TokVocab
+    todo("tokenizers-nv.tokmodel.vocab_of")
+
+// How many tokens the vocabulary has.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println("${tokmodel.vocab_size(m)}")
+// ```
+pub fn vocab_size(m: TokModel) -> Int
+    todo("tokenizers-nv.tokmodel.vocab_size")
+
+// Whether decoding is exact for anything this model encoded.
+//
+// True for byte-level BPE always, for unigram with byte fallback, and
+// for WordPiece never — see `tokpiece.decode`.  A caller building a
+// generation loop should know before it starts that the round trip will
+// hold; a caller building a classifier does not care.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println("${tokmodel.is_lossless(m)}")
+// ```
+pub fn is_lossless(m: TokModel) -> Bool
+    todo("tokenizers-nv.tokmodel.is_lossless")
+
+// Text as an encoding, with no special tokens added.
+//
+// The plain call, and the one a generation loop wants: no wrapping,
+// because the model continues the text and a `<s>` in the middle of a
+// continuation is wrong.
+//
+// TOTAL — no `Result`.  Every model here has an answer for every input:
+// BPE falls back to bytes, unigram to bytes or its unk piece, WordPiece
+// to its unk token.  A caller feeding a chat message into a model should
+// not have to handle a failure from the step before the model.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println("${list.len(tokmodel.encode(m, "hello").ids)}")
+// ```
+pub fn encode(m: TokModel, text: Str) -> TokEncoding
+    todo("tokenizers-nv.tokmodel.encode")
+
+// Text as an encoding, wrapped by a template.
+//
+// The wrapping the stdlib's `WordPiece` does unconditionally, here as a
+// choice — because whether a sequence gets `[CLS]` and `[SEP]` around it
+// depends on what the model is being asked to do, not on which
+// tokenizer it uses.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+// use tokspecial
+// use std.list
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     let e = tokmodel.encode_with(m, "hello", tokspecial.none(), TokTemplateSingle)
+//     println("${list.len(e.ids)}")
+// ```
+pub fn encode_with(m: TokModel, text: Str, s: TokSpecials, t: TokTemplate) -> TokEncoding
+    todo("tokenizers-nv.tokmodel.encode_with")
+
+// Two sequences as one encoding, with the pair template between them.
+//
+// What a sentence-pair model takes: the two texts, separated, with
+// `type_ids` saying which is which.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+// use tokspecial
+// use std.list
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     let e = tokmodel.encode_pair(m, "a", "b", tokspecial.none())
+//     println("${list.len(e.type_ids)}")
+// ```
+pub fn encode_pair(m: TokModel, first: Str, second: Str, s: TokSpecials) -> TokEncoding
+    todo("tokenizers-nv.tokmodel.encode_pair")
+
+// Several texts, each encoded on its own.
+//
+// A list rather than one padded block: padding is a separate decision
+// with a separate argument — see `padded` — and a caller that wanted
+// each sequence's real length back would have to undo it.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println("${list.len(tokmodel.encode_batch(m, ["a", "b"]))}")
+// ```
+pub fn encode_batch(m: TokModel, texts: [Str]) -> [TokEncoding]
+    todo("tokenizers-nv.tokmodel.encode_batch")
+
+// The encoding padded to a length, with the mask saying which positions
+// are real.
+//
+// Pads with `pad_id` and marks those positions 0 in `attention_mask`.
+// An encoding already at or past the length comes back unchanged —
+// TRUNCATION IS NOT THIS FUNCTION'S JOB, because dropping tokens off the
+// end of a sequence is a decision with consequences (which end? does the
+// template's closing token survive?) and doing it silently inside a
+// padding call is how a batch quietly loses its `[SEP]`.
+//
+// ```novo
+// use tokmodel
+// use tokspecial
+// use std.list
+//
+// fn main() [io]
+//     let e = tokmodel.padded(tokmodel.empty_encoding(), 8, tokspecial.none())
+//     println("${list.len(e.attention_mask)}")
+// ```
+pub fn padded(e: TokEncoding, to_length: Int, s: TokSpecials) -> TokEncoding
+    todo("tokenizers-nv.tokmodel.padded")
+
+// The encoding cut to a length, keeping the template's closing tokens.
+//
+// The other half, named so that a caller has to ask for it: the tokens
+// come off the END of the content, and anything a template added after
+// them is kept — so a truncated pair still ends with its separator and a
+// truncated sentence still ends with its `[SEP]`.
+//
+// ```novo
+// use tokmodel
+// use tokspecial
+// use std.list
+//
+// fn main() [io]
+//     let e = tokmodel.truncated(tokmodel.empty_encoding(), 4, tokspecial.none())
+//     println("${list.len(e.ids)}")
+// ```
+pub fn truncated(e: TokEncoding, to_length: Int, s: TokSpecials) -> TokEncoding
+    todo("tokenizers-nv.tokmodel.truncated")
+
+// Ids back to text.
+//
+// `TokIdOutOfRange` for an id the vocabulary does not have, which is
+// what a caller sees when the ids and the model came from different
+// checkpoints.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     match tokmodel.decode(m, [0])
+//         Ok(s)  => println(s)
+//         Err(_) => println("refused")
+// ```
+pub fn decode(m: TokModel, ids: [Int]) -> Result<Str, TokFault>
+    todo("tokenizers-nv.tokmodel.decode")
+
+// Ids back to text, with the special ones left out.
+//
+// What a chat loop prints: the ids a model generates include its own
+// control tokens, and printing them is how `<|im_end|>` ends up in
+// somebody's chat window.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+// use tokspecial
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     match tokmodel.decode_skipping_specials(m, [0], tokspecial.none())
+//         Ok(s)  => println(s)
+//         Err(_) => println("refused")
+// ```
+pub fn decode_skipping_specials(m: TokModel, ids: [Int], s: TokSpecials) -> Result<Str, TokFault>
+    todo("tokenizers-nv.tokmodel.decode_skipping_specials")
+
+// One id back to its text, for a loop printing tokens as they arrive.
+//
+// STREAMING IS NOT JUST THIS IN A LOOP, and the doc comment is the place
+// to say so: a BPE token can be half a UTF-8 sequence, so decoding ids
+// one at a time and printing each answer produces mojibake on any
+// non-ASCII text.  A streaming caller keeps the undecoded tail and
+// flushes it when it completes — which is what `decode_stream` does.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     match tokmodel.decode_one(m, 0)
+//         Ok(s)  => println(s)
+//         Err(_) => println("refused")
+// ```
+pub fn decode_one(m: TokModel, id: Int) -> Result<Str, TokFault>
+    todo("tokenizers-nv.tokmodel.decode_one")
+
+// The next ids decoded, with any incomplete character held back.
+//
+// THE STREAMING FORM, and the reason it takes and returns a `Str`: the
+// second value is the tail that is not yet a complete character, which
+// the caller passes back on the next call.  Text out, tail out; print
+// the first and keep the second.  Without this a generation loop
+// produces broken characters on every multi-byte sequence, which is a
+// bug every naive implementation has.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     match tokmodel.decode_stream(m, [0], "")
+//         Ok((text, tail)) => println("${text}|${tail}")
+//         Err(_)           => println("refused")
+// ```
+pub fn decode_stream(m: TokModel, ids: [Int], tail: Str) -> Result<(Str, Str), TokFault>
+    todo("tokenizers-nv.tokmodel.decode_stream")
+
+// Text as token strings, without the ids.
+//
+// For showing a person how their text was split, which is the question
+// behind most "why did the model do that".
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println("${list.len(tokmodel.tokenize(m, "hello"))}")
+// ```
+pub fn tokenize(m: TokModel, text: Str) -> [Str]
+    todo("tokenizers-nv.tokmodel.tokenize")
+
+// How many tokens a text would encode to, without building the
+// encoding.
+//
+// The one a prompt budget asks, on text it is about to throw away half
+// of — so it should not pay for the tokens, the offsets and the masks.
+//
+// ```novo
+// use tokmodel
+// use tokbpe
+// use tokvocab
+//
+// fn main() [io]
+//     let m = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))
+//     println("${tokmodel.token_count(m, "hello")}")
+// ```
+pub fn token_count(m: TokModel, text: Str) -> Int
+    todo("tokenizers-nv.tokmodel.token_count")
