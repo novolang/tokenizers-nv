@@ -253,7 +253,8 @@ the ids, for inspection and for a caller building something else.
   a demo with no dependency. This package supersedes it for anything new:
   `std.wordpiece` is ASCII-only, so an accented word tokenizes as unknown;
   it lower-cases unconditionally; its continuation prefix is fixed at `##`;
-  its unknown id defaults to 100 before it looks up `[UNK]`; its
+  its unknown id is whatever `[UNK]` has in the vocabulary, and is −1
+  when the vocabulary has no `[UNK]` at all; its
   token-to-id lookup is a linear scan; and its encode always wraps in
   `[CLS]` and `[SEP]`. This package makes each of those a field or a
   choice, and its vocabulary lookup is a binary search.
