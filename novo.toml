@@ -1,6 +1,6 @@
 [package]
 name        = "tokenizers-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The tokenizer family behind one enum: byte-level BPE as GPT-2 does it, SentencePiece unigram, and WordPiece, with encode to ids, decode from ids, special-token handling, and a vocabulary loaded from a value the caller holds rather than from a file."
 license     = "Apache-2.0"
 
