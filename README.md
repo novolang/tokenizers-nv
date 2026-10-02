@@ -109,8 +109,10 @@ fn prompt_ids(tokenizer_json: Str, text: Str) -> Result<[Int], TokFault>
 
     // Encoding is total, so there is no failure to handle here. The
     // template puts a beginning-of-sequence id in front and nothing
-    // after it, which is what a chat prompt wants.
-    Ok(tokmodel.encode_with(m, text, s, TokTemplateBosOnly).ids)
+    // after it, which is what a chat prompt wants. The ids are copied
+    // out of the encoding, because the caller of a plain `[Int]` may
+    // write the list it is handed.
+    Ok(tokmodel.encode_with(m, text, s, TokTemplateBosOnly).ids[:])
 
 fn main() [io]
     match prompt_ids("{}", "hello world")
