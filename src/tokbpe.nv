@@ -44,6 +44,7 @@
 // NO EFFECTS.
 
 use tokvocab
+use tokfault
 
 // One merge rule: two pieces that join, and how early.
 //

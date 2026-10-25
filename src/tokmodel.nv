@@ -43,6 +43,8 @@ use tokvocab
 use tokspecial
 use tokbpe
 use tokpiece
+use tokfault
+use tokunigram
 
 // One of the three tokenizers.
 //

@@ -34,6 +34,7 @@
 // NO EFFECTS.
 
 use tokvocab
+use tokfault
 
 // How text is normalised before it is split into words.
 //

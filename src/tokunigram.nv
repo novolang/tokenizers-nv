@@ -38,6 +38,7 @@
 // NO EFFECTS.
 
 use tokvocab
+use tokfault
 
 // One piece of a unigram vocabulary: its text and its score.
 //

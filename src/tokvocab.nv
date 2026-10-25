@@ -42,6 +42,8 @@
 // fn main() [io]
 //     println(tokvocab.added("<|endoftext|>", 50256, true).content)
 // ```
+use tokfault
+
 pub struct TokAddedToken
     // The literal text it matches.
     content: Str
