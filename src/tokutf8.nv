@@ -1,0 +1,170 @@
+// tokutf8.nv — reading a string as code points, and the character
+// classes the tokenizers split text on.
+//
+// A `Str` is a sequence of bytes.  Every other module in this package
+// works on bytes and reads code points only where a rule is written over
+// characters: the pre-tokenizer patterns, WordPiece's normalisation, and
+// the byte-to-character map of byte-level BPE.  This module is where that
+// reading is done once.
+//
+// A byte that does not start a complete UTF-8 sequence is one code point
+// of its own, numbered `0x110000 + byte`, which is above every Unicode
+// scalar value.  No class below holds it, so it is treated as a symbol and
+// its offset stays exact.
+//
+// No effects.
+
+use std.str
+use std.list
+use uclass
+
+// The code point value given to a byte that is not part of a complete
+// UTF-8 sequence, before the byte is added.
+const INVALID_BASE = 1114112
+
+// How many bytes the code point that starts at byte `at` occupies: 1 for
+// ASCII and for a byte that does not begin a complete sequence.
+//
+// ```novo
+// use tokutf8
+//
+// fn main() [io]
+//     println("${tokutf8.length_at("é", 0)}")
+// ```
+pub fn length_at(text: Str, at: Int) -> Int
+    let b0 = str.byte_at_or(text, at, 0)
+    var want = 1
+    if b0 >= 240 and b0 <= 244
+        want = 4
+    else
+        if b0 >= 224 and b0 < 240
+            want = 3
+        else
+            if b0 >= 194 and b0 < 224
+                want = 2
+    for k in 1..want
+        if (str.byte_at_or(text, at + k, 0) & 192) != 128
+            return 1
+    want
+
+// The code point that starts at byte `at`, or `0x110000` plus the byte
+// when it does not start a complete sequence.
+//
+// ```novo
+// use tokutf8
+//
+// fn main() [io]
+//     println("${tokutf8.code_at("é", 0)}")
+// ```
+pub fn code_at(text: Str, at: Int) -> Int
+    let b0 = str.byte_at_or(text, at, 0)
+    let n = length_at(text, at)
+    if n == 1
+        if b0 < 128
+            return b0
+        return INVALID_BASE + b0
+    var cp = if n == 2
+        b0 & 31
+    else
+        if n == 3
+            b0 & 15
+        else
+            b0 & 7
+    for k in 1..n
+        cp = (cp << 6) | (str.byte_at_or(text, at + k, 0) & 63)
+    if n == 3 and cp < 2048 or n == 4 and (cp < 65536 or cp > 1114111) or cp >= 55296 and cp <= 57343
+        return INVALID_BASE + b0
+    cp
+
+// Every code point of the text, in order.
+//
+// ```novo
+// use tokutf8
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokutf8.codes("aé"))}")
+// ```
+pub fn codes(text: Str) -> [Int]
+    var out: [Int] = []
+    var at = 0
+    let total = str.len(text)
+    while at < total
+        list.push(out, code_at(text, at))
+        at = at + step_at(text, at)
+    out
+
+// The byte offset at which each code point of the text starts, followed by
+// the length of the text, so the list holds one more entry than `codes`.
+//
+// ```novo
+// use tokutf8
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokutf8.starts("aé"))}")
+// ```
+pub fn starts(text: Str) -> [Int]
+    var out: [Int] = []
+    var at = 0
+    let total = str.len(text)
+    while at < total
+        list.push(out, at)
+        at = at + step_at(text, at)
+    list.push(out, total)
+    out
+
+// The width of the code point at `at` as `code_at` reads it: a sequence
+// `code_at` rejects counts as single bytes.
+fn step_at(text: Str, at: Int) -> Int
+    if code_at(text, at) >= INVALID_BASE
+        return 1
+    length_at(text, at)
+
+// A code point as its UTF-8 bytes, and a byte-numbered invalid code point
+// as the one byte it came from.
+//
+// ```novo
+// use tokutf8
+//
+// fn main() [io]
+//     println(tokutf8.encode(233))
+// ```
+pub fn encode(cp: Int) -> Str
+    if cp >= INVALID_BASE
+        return str.from_byte(cp - INVALID_BASE)
+    str.from_char(cp)
+
+// Whether the code point is a Unicode letter, the class `\p{L}`.
+//
+// ```novo
+// use tokutf8
+//
+// fn main() [io]
+//     println("${tokutf8.is_letter(233)}")
+// ```
+pub fn is_letter(cp: Int) -> Bool
+    cp < INVALID_BASE and uclass.is_letter(cp)
+
+// Whether the code point is a Unicode number, the class `\p{N}`.
+//
+// ```novo
+// use tokutf8
+//
+// fn main() [io]
+//     println("${tokutf8.is_number(50)}")
+// ```
+pub fn is_number(cp: Int) -> Bool
+    cp < INVALID_BASE and uclass.is_alphanumeric(cp) and not uclass.is_letter(cp)
+
+// Whether the code point has the Unicode White_Space property, the class
+// `\s`.
+//
+// ```novo
+// use tokutf8
+//
+// fn main() [io]
+//     println("${tokutf8.is_space(32)}")
+// ```
+pub fn is_space(cp: Int) -> Bool
+    cp < INVALID_BASE and uclass.is_whitespace(cp)

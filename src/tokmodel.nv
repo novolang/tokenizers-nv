@@ -45,6 +45,9 @@ use tokbpe
 use tokpiece
 use tokfault
 use tokunigram
+use std.str
+use std.list
+use std.json
 
 // One of the three tokenizers.
 //
@@ -114,7 +117,7 @@ pub struct TokEncoding
 //     println("${list.len(tokmodel.empty_encoding().ids)}")
 // ```
 pub fn empty_encoding() -> TokEncoding
-    todo("tokenizers-nv.tokmodel.empty_encoding")
+    TokEncoding { ids: [], tokens: [], offsets: [], lengths: [], type_ids: [], attention_mask: [] }
 
 // A tokenizer from the TEXT of a `tokenizer.json`.
 //
@@ -138,7 +141,19 @@ pub fn empty_encoding() -> TokEncoding
 //         Err(_) => println("refused")
 // ```
 pub fn of_tokenizer_json(text: Str) -> Result<TokModel, TokFault>
-    todo("tokenizers-nv.tokmodel.of_tokenizer_json")
+    let Some(root) = json.parse(text) else return Err(TokMalformedJson(0, "well-formed JSON"))
+    let Some(model) = json.get(root, "model") else return Err(TokMalformedJson(0, "a tokenizer with a 'model' member"))
+    let kind = json.get_str(model, "type") ?? ""
+    var added: [TokAddedToken] = []
+    if let Some(items) = json.get(root, "added_tokens")
+        added = tokspecial.added_tokens_of_json(json.stringify(items))!
+    if kind == "BPE"
+        return bpe_of_json(root, model, added)
+    if kind == "Unigram"
+        return unigram_of_json(root, model, added)
+    if kind == "WordPiece"
+        return wordpiece_of_json(root, model, added)
+    Err(TokUnknownModel(kind))
 
 // The specials a `tokenizer.json`'s text describes.
 //
@@ -156,7 +171,9 @@ pub fn of_tokenizer_json(text: Str) -> Result<TokModel, TokFault>
 //         Err(_) => println("refused")
 // ```
 pub fn specials_of_tokenizer_json(text: Str) -> Result<TokSpecials, TokFault>
-    todo("tokenizers-nv.tokmodel.specials_of_tokenizer_json")
+    let Some(root) = json.parse(text) else return Err(TokMalformedJson(0, "well-formed JSON"))
+    let Some(items) = json.get(root, "added_tokens") else return Ok(tokspecial.none())
+    tokspecial.of_added_tokens_json(json.stringify(items))
 
 // Which of the three this is: `"BPE"`, `"Unigram"` or `"WordPiece"`.
 //
@@ -173,7 +190,10 @@ pub fn specials_of_tokenizer_json(text: Str) -> Result<TokSpecials, TokFault>
 //     println(tokmodel.model_name(m))
 // ```
 pub fn model_name(m: TokModel) -> Str
-    todo("tokenizers-nv.tokmodel.model_name")
+    match m
+        TokBpeModel(_)       => "BPE"
+        TokUnigramModel(_)   => "Unigram"
+        TokWordPieceModel(_) => "WordPiece"
 
 // The vocabulary a model holds.
 //
@@ -191,7 +211,10 @@ pub fn model_name(m: TokModel) -> Str
 //     println("${tokvocab.size(tokmodel.vocab_of(m))}")
 // ```
 pub fn vocab_of(m: TokModel) -> TokVocab
-    todo("tokenizers-nv.tokmodel.vocab_of")
+    match m
+        TokBpeModel(b)       => b.vocab
+        TokUnigramModel(u)   => u.vocab
+        TokWordPieceModel(w) => w.vocab
 
 // How many tokens the vocabulary has.
 //
@@ -205,7 +228,7 @@ pub fn vocab_of(m: TokModel) -> TokVocab
 //     println("${tokmodel.vocab_size(m)}")
 // ```
 pub fn vocab_size(m: TokModel) -> Int
-    todo("tokenizers-nv.tokmodel.vocab_size")
+    tokvocab.size(vocab_of(m))
 
 // Whether decoding is exact for anything this model encoded.
 //
@@ -224,7 +247,10 @@ pub fn vocab_size(m: TokModel) -> Int
 //     println("${tokmodel.is_lossless(m)}")
 // ```
 pub fn is_lossless(m: TokModel) -> Bool
-    todo("tokenizers-nv.tokmodel.is_lossless")
+    match m
+        TokBpeModel(_)       => true
+        TokUnigramModel(u)   => u.byte_fallback
+        TokWordPieceModel(_) => false
 
 // Text as an encoding, with no special tokens added.
 //
@@ -248,7 +274,18 @@ pub fn is_lossless(m: TokModel) -> Bool
 //     println("${list.len(tokmodel.encode(m, "hello").ids)}")
 // ```
 pub fn encode(m: TokModel, text: Str) -> TokEncoding
-    todo("tokenizers-nv.tokmodel.encode")
+    match m
+        TokBpeModel(b)       => bpe_encoding(b, text)
+        TokUnigramModel(u)   =>
+            let (ids, tokens, spans) = tokunigram.pieces_with_spans(u, text)
+            encoding_of(ids, tokens, spans, 0)
+        TokWordPieceModel(w) =>
+            let (pieces, spans) = tokpiece.pieces_with_spans(w, text)
+            var ids: [Int] = []
+            for p in pieces
+                let id = tokvocab.id_of(w.vocab, p)
+                list.push(ids, (if id >= 0 then id else w.unk_id))
+            encoding_of(ids, pieces, spans, 0)
 
 // Text as an encoding, wrapped by a template.
 //
@@ -270,7 +307,9 @@ pub fn encode(m: TokModel, text: Str) -> TokEncoding
 //     println("${list.len(e.ids)}")
 // ```
 pub fn encode_with(m: TokModel, text: Str, s: TokSpecials, t: TokTemplate) -> TokEncoding
-    todo("tokenizers-nv.tokmodel.encode_with")
+    let e = encode(m, text)
+    let (pre, post) = tokspecial.template_ids(t, s)
+    wrap(m, e, pre, post, 0, str.len(text), 0, 0)
 
 // Two sequences as one encoding, with the pair template between them.
 //
@@ -290,7 +329,11 @@ pub fn encode_with(m: TokModel, text: Str, s: TokSpecials, t: TokTemplate) -> To
 //     println("${list.len(e.type_ids)}")
 // ```
 pub fn encode_pair(m: TokModel, first: Str, second: Str, s: TokSpecials) -> TokEncoding
-    todo("tokenizers-nv.tokmodel.encode_pair")
+    let a = encode(m, first)
+    let b = encode(m, second)
+    let (pre, post) = tokspecial.template_ids(TokTemplatePair, s)
+    let first_part = wrap(m, a, pre, tokspecial.pair_separator_ids(s), 0, str.len(first), 0, 0)
+    wrap(m, concat(first_part, b, 1), [], post, 0, str.len(second), 1, 1)
 
 // Several texts, each encoded on its own.
 //
@@ -309,7 +352,10 @@ pub fn encode_pair(m: TokModel, first: Str, second: Str, s: TokSpecials) -> TokE
 //     println("${list.len(tokmodel.encode_batch(m, ["a", "b"]))}")
 // ```
 pub fn encode_batch(m: TokModel, texts: [Str]) -> [TokEncoding]
-    todo("tokenizers-nv.tokmodel.encode_batch")
+    var out: [TokEncoding] = []
+    for t in texts
+        list.push(out, encode(m, t))
+    out
 
 // The encoding padded to a length, with the mask saying which positions
 // are real.
@@ -331,7 +377,21 @@ pub fn encode_batch(m: TokModel, texts: [Str]) -> [TokEncoding]
 //     println("${list.len(e.attention_mask)}")
 // ```
 pub fn padded(e: TokEncoding, to_length: Int, s: TokSpecials) -> TokEncoding
-    todo("tokenizers-nv.tokmodel.padded")
+    var ids = list.clone(e.ids)
+    var tokens = list.clone(e.tokens)
+    var offsets = list.clone(e.offsets)
+    var lengths = list.clone(e.lengths)
+    var types = list.clone(e.type_ids)
+    var mask = list.clone(e.attention_mask)
+    while list.len(ids) < to_length
+        list.push(ids, s.pad_id)
+        list.push(tokens, "")
+        list.push(offsets, 0)
+        list.push(lengths, 0)
+        list.push(types, 0)
+        list.push(mask, 0)
+    TokEncoding { ids: ids, tokens: tokens, offsets: offsets, lengths: lengths,
+                  type_ids: types, attention_mask: mask }
 
 // The encoding cut to a length, keeping the template's closing tokens.
 //
@@ -350,7 +410,19 @@ pub fn padded(e: TokEncoding, to_length: Int, s: TokSpecials) -> TokEncoding
 //     println("${list.len(e.ids)}")
 // ```
 pub fn truncated(e: TokEncoding, to_length: Int, s: TokSpecials) -> TokEncoding
-    todo("tokenizers-nv.tokmodel.truncated")
+    let n = list.len(e.ids)
+    if n <= to_length
+        return e
+    // The closing tokens a template added, which have no text of their own.
+    var closing = 0
+    while closing < n and e.lengths[n - 1 - closing] == 0 and e.attention_mask[n - 1 - closing] == 1
+        closing = closing + 1
+    if closing >= to_length
+        closing = 0
+    let keep = to_length - closing
+    TokEncoding { ids: kept(e.ids, keep, closing), tokens: kept_str(e.tokens, keep, closing),
+                  offsets: kept(e.offsets, keep, closing), lengths: kept(e.lengths, keep, closing),
+                  type_ids: kept(e.type_ids, keep, closing), attention_mask: kept(e.attention_mask, keep, closing) }
 
 // Ids back to text.
 //
@@ -370,7 +442,10 @@ pub fn truncated(e: TokEncoding, to_length: Int, s: TokSpecials) -> TokEncoding
 //         Err(_) => println("refused")
 // ```
 pub fn decode(m: TokModel, ids: [Int]) -> Result<Str, TokFault>
-    todo("tokenizers-nv.tokmodel.decode")
+    match m
+        TokBpeModel(b)       => tokbpe.decode(b, ids)
+        TokUnigramModel(u)   => tokunigram.decode(u, ids)
+        TokWordPieceModel(w) => tokpiece.decode(w, ids)
 
 // Ids back to text, with the special ones left out.
 //
@@ -391,7 +466,12 @@ pub fn decode(m: TokModel, ids: [Int]) -> Result<Str, TokFault>
 //         Err(_) => println("refused")
 // ```
 pub fn decode_skipping_specials(m: TokModel, ids: [Int], s: TokSpecials) -> Result<Str, TokFault>
-    todo("tokenizers-nv.tokmodel.decode_skipping_specials")
+    var kept_ids: [Int] = []
+    let v = vocab_of(m)
+    for id in ids
+        if not tokspecial.is_special(s, id) and not is_special_added(v, id)
+            list.push(kept_ids, id)
+    decode(m, kept_ids)
 
 // One id back to its text, for a loop printing tokens as they arrive.
 //
@@ -413,9 +493,13 @@ pub fn decode_skipping_specials(m: TokModel, ids: [Int], s: TokSpecials) -> Resu
 //         Err(_) => println("refused")
 // ```
 pub fn decode_one(m: TokModel, id: Int) -> Result<Str, TokFault>
-    todo("tokenizers-nv.tokmodel.decode_one")
+    decode(m, [id])
 
 // The next ids decoded, with any incomplete character held back.
+//
+// For a model other than byte-level BPE each call decodes its ids as a
+// list of their own, so a unigram model drops the leading mark of every
+// call and WordPiece does not join a continuation to the previous call.
 //
 // THE STREAMING FORM, and the reason it takes and returns a `Str`: the
 // second value is the tail that is not yet a complete character, which
@@ -436,7 +520,10 @@ pub fn decode_one(m: TokModel, id: Int) -> Result<Str, TokFault>
 //         Err(_)           => println("refused")
 // ```
 pub fn decode_stream(m: TokModel, ids: [Int], tail: Str) -> Result<(Str, Str), TokFault>
-    todo("tokenizers-nv.tokmodel.decode_stream")
+    let text = decode(m, ids)!
+    let held = tail + text
+    let cut = complete_prefix(held)
+    Ok((str.slice(held, 0, cut), str.slice(held, cut, str.len(held))))
 
 // Text as token strings, without the ids.
 //
@@ -454,7 +541,7 @@ pub fn decode_stream(m: TokModel, ids: [Int], tail: Str) -> Result<(Str, Str), T
 //     println("${list.len(tokmodel.tokenize(m, "hello"))}")
 // ```
 pub fn tokenize(m: TokModel, text: Str) -> [Str]
-    todo("tokenizers-nv.tokmodel.tokenize")
+    list.clone(encode(m, text).tokens)
 
 // How many tokens a text would encode to, without building the
 // encoding.
@@ -472,4 +559,246 @@ pub fn tokenize(m: TokModel, text: Str) -> [Str]
 //     println("${tokmodel.token_count(m, "hello")}")
 // ```
 pub fn token_count(m: TokModel, text: Str) -> Int
-    todo("tokenizers-nv.tokmodel.token_count")
+    list.len(encode(m, text).ids)
+
+fn bpe_encoding(b: TokBpe, text: Str) -> TokEncoding
+    let (pieces, spans) = tokbpe.pieces_with_spans(b, text)
+    var ids: [Int] = []
+    for p in pieces
+        list.push(ids, tokvocab.id_of(b.vocab, p))
+    encoding_of(ids, pieces, spans, 0)
+
+fn encoding_of(ids: [Int], tokens: [Str], spans: [Int], type_id: Int) -> TokEncoding
+    var offsets: [Int] = []
+    var lengths: [Int] = []
+    var types: [Int] = []
+    var mask: [Int] = []
+    for k in 0..list.len(ids)
+        list.push(offsets, spans[2 * k])
+        list.push(lengths, spans[2 * k + 1])
+        list.push(types, type_id)
+        list.push(mask, 1)
+    TokEncoding { ids: ids, tokens: tokens, offsets: offsets, lengths: lengths,
+                  type_ids: types, attention_mask: mask }
+
+// The two encodings end to end, the second marked with a type id.  The
+// offsets stay relative to each text.
+fn concat(a: TokEncoding, b: TokEncoding, type_id: Int) -> TokEncoding
+    var ids = list.clone(a.ids)
+    var tokens = list.clone(a.tokens)
+    var offsets = list.clone(a.offsets)
+    var lengths = list.clone(a.lengths)
+    var types = list.clone(a.type_ids)
+    var mask = list.clone(a.attention_mask)
+    for k in 0..list.len(b.ids)
+        list.push(ids, b.ids[k])
+        list.push(tokens, b.tokens[k])
+        list.push(offsets, b.offsets[k])
+        list.push(lengths, b.lengths[k])
+        list.push(types, type_id)
+        list.push(mask, 1)
+    TokEncoding { ids: ids, tokens: tokens, offsets: offsets, lengths: lengths,
+                  type_ids: types, attention_mask: mask }
+
+// The encoding with the ids a template puts before and after it.  A token a
+// template added sits at the boundary it was added at, has length 0, and
+// takes the type id given.
+fn wrap(m: TokModel, e: TokEncoding, pre: [Int], post: [Int], start: Int, end: Int, pre_type: Int,
+        post_type: Int) -> TokEncoding
+    let v = vocab_of(m)
+    var ids: [Int] = []
+    var tokens: [Str] = []
+    var offsets: [Int] = []
+    var lengths: [Int] = []
+    var types: [Int] = []
+    var mask: [Int] = []
+    for id in pre
+        list.push(ids, id)
+        list.push(tokens, tokvocab.token_of(v, id))
+        list.push(offsets, start)
+        list.push(lengths, 0)
+        list.push(types, pre_type)
+        list.push(mask, 1)
+    for k in 0..list.len(e.ids)
+        list.push(ids, e.ids[k])
+        list.push(tokens, e.tokens[k])
+        list.push(offsets, e.offsets[k])
+        list.push(lengths, e.lengths[k])
+        list.push(types, e.type_ids[k])
+        list.push(mask, 1)
+    for id in post
+        list.push(ids, id)
+        list.push(tokens, tokvocab.token_of(v, id))
+        list.push(offsets, end)
+        list.push(lengths, 0)
+        list.push(types, post_type)
+        list.push(mask, 1)
+    TokEncoding { ids: ids, tokens: tokens, offsets: offsets, lengths: lengths,
+                  type_ids: types, attention_mask: mask }
+
+fn kept(xs: [Int], keep: Int, closing: Int) -> [Int]
+    list.concat(list.take(xs, keep), list.drop(xs, list.len(xs) - closing))
+
+fn kept_str(xs: [Str], keep: Int, closing: Int) -> [Str]
+    list.concat(list.take(xs, keep), list.drop(xs, list.len(xs) - closing))
+
+fn is_special_added(v: TokVocab, id: Int) -> Bool
+    for a in v.added
+        if a.id == id
+            return a.special
+    false
+
+// How many leading bytes of the text are whole UTF-8 characters.  A
+// sequence cut short at the end is held back.
+fn complete_prefix(text: Str) -> Int
+    let n = str.len(text)
+    var back = 1
+    while back <= 3 and back <= n
+        let b = str.byte_at_or(text, n - back, 0)
+        if (b & 192) == 128
+            back = back + 1
+        else
+            let need = if b >= 240
+                4
+            else
+                if b >= 224
+                    3
+                else
+                    if b >= 192
+                        2
+                    else
+                        1
+            if need > back
+                return n - back
+            return n
+    n
+
+// ---- reading a tokenizer.json ----
+
+fn merges_of(model: JsonValueH) -> Result<[TokMerge], TokFault>
+    var out: [TokMerge] = []
+    let items = json.get_list(model, "merges") ?? []
+    for item in items
+        if json.type_of(item) == "string"
+            let line = json.to_str(item) ?? ""
+            let parts = str.split(line, " ")
+            if list.len(parts) != 2
+                return Err(TokMalformedMerge(list.len(out) + 1, line))
+            list.push(out, tokbpe.merge(parts[0], parts[1], list.len(out)))
+        else
+            let pair = json.to_list(item) ?? []
+            if list.len(pair) != 2
+                return Err(TokMalformedMerge(list.len(out) + 1, json.stringify(item)))
+            list.push(out,
+                tokbpe.merge(json.to_str(pair[0]) ?? "", json.to_str(pair[1]) ?? "", list.len(out)))
+    Ok(out)
+
+// The steps of a pre_tokenizer description, flattened: `ByteLevel` and its
+// options, `Split:<pattern>`, or the step's type name.
+fn walk_pre(p: JsonValueH) -> [Str]
+    var out: [Str] = []
+    if json.type_of(p) != "object"
+        return out
+    let kind = json.get_str(p, "type") ?? ""
+    if kind == "Sequence"
+        for item in json.get_list(p, "pretokenizers") ?? []
+            list.append(out, walk_pre(item))
+        return out
+    if kind == "Split"
+        if let Some(pattern) = json.get(p, "pattern")
+            // workaround(nested-default-chain-in-a-concatenation-leaks-a-string): the
+            // chain is bound to a name before it is joined to the prefix.
+            let found = json.get_str(pattern, "Regex") ?? (json.get_str(pattern, "String") ?? "")
+            list.push(out, "Split:" + found)
+        return out
+    if kind == "ByteLevel"
+        list.push(out, "ByteLevel")
+        if json.get_bool(p, "add_prefix_space") ?? false
+            list.push(out, "ByteLevel:prefix")
+        if not (json.get_bool(p, "use_regex") ?? true)
+            list.push(out, "ByteLevel:noregex")
+        return out
+    list.push(out, kind)
+    out
+
+fn rule_of(steps: [Str]) -> Result<TokPretokenRule, TokFault>
+    var found = 0 - 1
+    for step in steps
+        if str.starts_with(step, "Split:")
+            let pattern = str.slice(step, 6, str.len(step))
+            if str.contains(pattern, "{1,3}")
+                found = 1
+            else
+                if str.contains(pattern, "(?i:") and str.contains(pattern, "|\\p{N}|")
+                    found = 2
+                else
+                    if str.contains(pattern, "'s|'t|'re|'ve|'m|'ll|'d|") and str.contains(pattern, "\\p{L}+")
+                        found = 0
+                    else
+                        return Err(TokMalformedJson(0, "a pre-tokenizer pattern this package implements, not '${pattern}'"))
+        if step == "ByteLevel" and found < 0 and not list.contains(steps, "ByteLevel:noregex")
+            found = 0
+    if found == 0
+        return Ok(TokPretokenGpt2)
+    if found == 1
+        return Ok(TokPretokenLlama3)
+    if found == 2
+        return Ok(TokPretokenQwen2)
+    Err(TokMalformedJson(0, "a byte-level pre-tokenizer"))
+
+fn bpe_of_json(root: JsonValueH, model: JsonValueH,
+               added: [TokAddedToken]) -> Result<TokModel, TokFault>
+    let Some(vocab_value) = json.get(model, "vocab") else return Err(TokMalformedJson(0, "a BPE model with a 'vocab' member"))
+    let vocab = tokvocab.with_added(tokvocab.of_json_object(json.stringify(vocab_value))!, added)
+    let merges = merges_of(model)!
+    var steps: [Str] = []
+    if let Some(pre) = json.get(root, "pre_tokenizer")
+        steps = walk_pre(pre)
+    let rule = rule_of(steps)!
+    let base = tokbpe.of_parts(vocab, merges, rule)
+    Ok(TokBpeModel(tokbpe.with_prefix_space(base, list.contains(steps, "ByteLevel:prefix"))))
+
+fn unigram_of_json(root: JsonValueH, model: JsonValueH,
+                   added: [TokAddedToken]) -> Result<TokModel, TokFault>
+    let Some(vocab_value) = json.get(model, "vocab") else return Err(TokMalformedJson(0, "a Unigram model with a 'vocab' member"))
+    let unk = json.get_int(model, "unk_id") ?? 0
+    let u = tokunigram.of_json_pieces(json.stringify(vocab_value), unk)!
+    var prefix = true
+    if let Some(pre) = json.get(root, "pre_tokenizer")
+        if json.get_str(pre, "type") == Some("Metaspace")
+            if json.get_str(pre, "prepend_scheme") == Some("never") or json.get_bool(pre, "add_prefix_space") == Some(false)
+                prefix = false
+    let filled = tokunigram.with_dummy_prefix(tokunigram.with_byte_fallback(u, json.get_bool(model, "byte_fallback") ?? false), prefix)
+    Ok(TokUnigramModel(TokUnigram { vocab: tokvocab.with_added(filled.vocab, added), scores: filled.scores,
+                                    unk_id: filled.unk_id, byte_fallback: filled.byte_fallback,
+                                    add_dummy_prefix: filled.add_dummy_prefix, min_score: filled.min_score }))
+
+fn wordpiece_of_json(root: JsonValueH, model: JsonValueH,
+                     added: [TokAddedToken]) -> Result<TokModel, TokFault>
+    let Some(vocab_value) = json.get(model, "vocab") else return Err(TokMalformedJson(0, "a WordPiece model with a 'vocab' member"))
+    let vocab = tokvocab.with_added(tokvocab.of_json_object(json.stringify(vocab_value))!, added)
+    let unk_token = json.get_str(model, "unk_token") ?? "[UNK]"
+    let unk = tokvocab.id_of(vocab, unk_token)
+    if unk < 0
+        return Err(TokBadVocabEntry(unk_token, unk))
+    var lower = false
+    var strip = false
+    var cjk = false
+    var clean = false
+    var punct = false
+    if let Some(norm) = json.get(root, "normalizer")
+        if json.get_str(norm, "type") == Some("BertNormalizer")
+            lower = json.get_bool(norm, "lowercase") ?? true
+            strip = json.get_bool(norm, "strip_accents") ?? lower
+            cjk = json.get_bool(norm, "handle_chinese_chars") ?? true
+            clean = json.get_bool(norm, "clean_text") ?? true
+    if let Some(pre) = json.get(root, "pre_tokenizer")
+        punct = json.get_str(pre, "type") == Some("BertPreTokenizer")
+    let rules = TokNormalizer { lowercase: lower, strip_accents: strip, split_punctuation: punct,
+                                split_cjk: cjk, clean_whitespace: clean }
+    let w = tokpiece.of_vocab(vocab, unk)
+    let configured = tokpiece.with_max_word_len(
+        tokpiece.with_continuation(tokpiece.with_normalizer(w, rules),
+                                   json.get_str(model, "continuing_subword_prefix") ?? "##"),
+        json.get_int(model, "max_input_chars_per_word") ?? 100)
+    Ok(TokWordPieceModel(configured))

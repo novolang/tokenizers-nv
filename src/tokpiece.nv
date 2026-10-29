@@ -35,6 +35,13 @@
 
 use tokvocab
 use tokfault
+use tokutf8
+use udata
+use unorm
+use ucase
+use uclass
+use std.str
+use std.list
 
 // How text is normalised before it is split into words.
 //
@@ -103,7 +110,8 @@ pub struct TokWordPiece
 //     println("${tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]"]), 0).max_word_len}")
 // ```
 pub fn of_vocab(vocab: TokVocab, unk_id: Int) -> TokWordPiece
-    todo("tokenizers-nv.tokpiece.of_vocab")
+    TokWordPiece { vocab: vocab, continuation: "##", unk_id: unk_id,
+                   normalizer: bert_uncased_rules(), max_word_len: 100 }
 
 // A WordPiece tokenizer from a `vocab.txt`'s TEXT, with the unk id
 // looked up rather than assumed.
@@ -122,7 +130,11 @@ pub fn of_vocab(vocab: TokVocab, unk_id: Int) -> TokWordPiece
 //         Err(_) => println("refused")
 // ```
 pub fn of_vocab_text(text: Str, unk_token: Str) -> Result<TokWordPiece, TokFault>
-    todo("tokenizers-nv.tokpiece.of_vocab_text")
+    let vocab = tokvocab.of_lines(text)
+    let unk = tokvocab.id_of(vocab, unk_token)
+    if unk < 0
+        return Err(TokBadVocabEntry(unk_token, unk))
+    Ok(of_vocab(vocab, unk))
 
 // BERT-uncased's four rules: lowercase, strip accents, split punctuation
 // and CJK, clean whitespace.
@@ -134,7 +146,8 @@ pub fn of_vocab_text(text: Str, unk_token: Str) -> Result<TokWordPiece, TokFault
 //     println("${tokpiece.bert_uncased_rules().lowercase}")
 // ```
 pub fn bert_uncased_rules() -> TokNormalizer
-    todo("tokenizers-nv.tokpiece.bert_uncased_rules")
+    TokNormalizer { lowercase: true, strip_accents: true, split_punctuation: true,
+                    split_cjk: true, clean_whitespace: true }
 
 // BERT-cased's: the splitting and the whitespace cleaning, and neither
 // of the two that change letters.
@@ -146,7 +159,8 @@ pub fn bert_uncased_rules() -> TokNormalizer
 //     println("${tokpiece.bert_cased_rules().lowercase}")
 // ```
 pub fn bert_cased_rules() -> TokNormalizer
-    todo("tokenizers-nv.tokpiece.bert_cased_rules")
+    TokNormalizer { lowercase: false, strip_accents: false, split_punctuation: true,
+                    split_cjk: true, clean_whitespace: true }
 
 // No normalisation at all: the text is split on whitespace and nothing
 // else.
@@ -158,7 +172,8 @@ pub fn bert_cased_rules() -> TokNormalizer
 //     println("${tokpiece.no_normalization().split_punctuation}")
 // ```
 pub fn no_normalization() -> TokNormalizer
-    todo("tokenizers-nv.tokpiece.no_normalization")
+    TokNormalizer { lowercase: false, strip_accents: false, split_punctuation: false,
+                    split_cjk: false, clean_whitespace: false }
 
 // The same tokenizer with a different continuation prefix.
 //
@@ -171,7 +186,8 @@ pub fn no_normalization() -> TokNormalizer
 //     println(tokpiece.with_continuation(w, "▁").continuation)
 // ```
 pub fn with_continuation(w: TokWordPiece, prefix: Str) -> TokWordPiece
-    todo("tokenizers-nv.tokpiece.with_continuation")
+    TokWordPiece { vocab: w.vocab, continuation: prefix, unk_id: w.unk_id,
+                   normalizer: w.normalizer, max_word_len: w.max_word_len }
 
 // The same tokenizer with different normalisation rules.
 //
@@ -184,7 +200,8 @@ pub fn with_continuation(w: TokWordPiece, prefix: Str) -> TokWordPiece
 //     println("${tokpiece.with_normalizer(w, tokpiece.bert_cased_rules()).normalizer.lowercase}")
 // ```
 pub fn with_normalizer(w: TokWordPiece, n: TokNormalizer) -> TokWordPiece
-    todo("tokenizers-nv.tokpiece.with_normalizer")
+    TokWordPiece { vocab: w.vocab, continuation: w.continuation, unk_id: w.unk_id,
+                   normalizer: n, max_word_len: w.max_word_len }
 
 // The same tokenizer with a different maximum word length.
 //
@@ -197,9 +214,18 @@ pub fn with_normalizer(w: TokWordPiece, n: TokNormalizer) -> TokWordPiece
 //     println("${tokpiece.with_max_word_len(w, 200).max_word_len}")
 // ```
 pub fn with_max_word_len(w: TokWordPiece, n: Int) -> TokWordPiece
-    todo("tokenizers-nv.tokpiece.with_max_word_len")
+    TokWordPiece { vocab: w.vocab, continuation: w.continuation, unk_id: w.unk_id,
+                   normalizer: w.normalizer, max_word_len: n }
 
-// Text with the normaliser's rules applied.
+// Text with the normaliser's rules applied, one character at a time.
+//
+// With `clean_whitespace`, control, format, private-use and unassigned
+// characters are dropped, every other kind of white space becomes a space,
+// and runs of spaces become one with none at either end.  With
+// `split_cjk`, each ideograph gets a space on each side.  With
+// `strip_accents`, each character is decomposed and its non-spacing marks
+// are dropped.  With `lowercase`, each character is lowercased on its own,
+// so a capital sigma is always `σ`.
 //
 // Public because it is the step a caller compares against the reference
 // first: a divergence here explains every divergence downstream, and
@@ -213,7 +239,8 @@ pub fn with_max_word_len(w: TokWordPiece, n: Int) -> TokWordPiece
 //     println(tokpiece.normalize(tokpiece.bert_uncased_rules(), "Héllo"))
 // ```
 pub fn normalize(n: TokNormalizer, text: Str) -> Str
-    todo("tokenizers-nv.tokpiece.normalize")
+    let (out, _, _) = normalize_mapped(n, text)
+    out
 
 // Normalised text split into the words WordPiece then works on.
 //
@@ -225,7 +252,29 @@ pub fn normalize(n: TokNormalizer, text: Str) -> Str
 //     println("${list.len(tokpiece.split_words(tokpiece.bert_uncased_rules(), "a, b"))}")
 // ```
 pub fn split_words(n: TokNormalizer, text: Str) -> [Str]
-    todo("tokenizers-nv.tokpiece.split_words")
+    let t = normalize(n, text)
+    var words: [Str] = []
+    let cps = tokutf8.codes(t)
+    let starts = tokutf8.starts(t)
+    var from = 0 - 1
+    for k in 0..list.len(cps)
+        let cp = cps[k]
+        if tokutf8.is_space(cp)
+            if from >= 0
+                list.push(words, str.slice(t, starts[from], starts[k]))
+                from = 0 - 1
+        else
+            if n.split_punctuation and is_punctuation(cp)
+                if from >= 0
+                    list.push(words, str.slice(t, starts[from], starts[k]))
+                    from = 0 - 1
+                list.push(words, str.slice(t, starts[k], starts[k + 1]))
+            else
+                if from < 0
+                    from = k
+    if from >= 0
+        list.push(words, str.slice(t, starts[from], starts[list.len(cps)]))
+    words
 
 // One word as its pieces, or a single unk token.
 //
@@ -245,7 +294,27 @@ pub fn split_words(n: TokNormalizer, text: Str) -> [Str]
 //     println("${list.len(tokpiece.piece_word(w, "a"))}")
 // ```
 pub fn piece_word(w: TokWordPiece, word: Str) -> [Str]
-    todo("tokenizers-nv.tokpiece.piece_word")
+    let unk = [tokvocab.token_of(w.vocab, w.unk_id)]
+    let width = list.len(tokutf8.codes(word))
+    if width > w.max_word_len or width == 0
+        return unk
+    var out: [Str] = []
+    var at = 0
+    let total = str.len(word)
+    while at < total
+        // The longest vocabulary entry that begins the rest of the word,
+        // with the continuation prefix in front of every piece but the
+        // first.
+        let lead = if at == 0
+            ""
+        else
+            w.continuation
+        let (tok, id) = tokvocab.longest_prefix(w.vocab, lead + str.slice(word, at, total), 0)
+        if id < 0 or str.len(tok) <= str.len(lead)
+            return unk
+        list.push(out, tok)
+        at = at + str.len(tok) - str.len(lead)
+    out
 
 // Text as token ids.
 //
@@ -266,7 +335,12 @@ pub fn piece_word(w: TokWordPiece, word: Str) -> [Str]
 //     println("${list.len(tokpiece.encode(w, "a"))}")
 // ```
 pub fn encode(w: TokWordPiece, text: Str) -> [Int]
-    todo("tokenizers-nv.tokpiece.encode")
+    let (pieces, _) = pieces_with_spans(w, text)
+    var ids: [Int] = []
+    for piece in pieces
+        let id = tokvocab.id_of(w.vocab, piece)
+        list.push(ids, (if id >= 0 then id else w.unk_id))
+    ids
 
 // Text as token strings, `##` and all.
 //
@@ -280,7 +354,8 @@ pub fn encode(w: TokWordPiece, text: Str) -> [Int]
 //     println("${list.len(tokpiece.tokenize(w, "a"))}")
 // ```
 pub fn tokenize(w: TokWordPiece, text: Str) -> [Str]
-    todo("tokenizers-nv.tokpiece.tokenize")
+    let (pieces, _) = pieces_with_spans(w, text)
+    pieces
 
 // Token ids back to text.
 //
@@ -301,4 +376,194 @@ pub fn tokenize(w: TokWordPiece, text: Str) -> [Str]
 //         Err(_) => println("refused")
 // ```
 pub fn decode(w: TokWordPiece, ids: [Int]) -> Result<Str, TokFault>
-    todo("tokenizers-nv.tokpiece.decode")
+    var out = ""
+    var first = true
+    for id in ids
+        if id < 0 or id >= tokvocab.size(w.vocab)
+            return Err(TokIdOutOfRange(id, tokvocab.size(w.vocab)))
+        let token = tokvocab.token_of(w.vocab, id)
+        if str.starts_with(token, w.continuation) and str.len(token) > str.len(w.continuation)
+            out = out + str.slice(token, str.len(w.continuation), str.len(token))
+        else
+            if not first
+                out = out + " "
+            out = out + token
+        first = false
+    Ok(out)
+
+// Whether BERT splits the code point into a word of its own: the ASCII
+// punctuation and symbol ranges, and every Unicode punctuation character.
+fn is_punctuation(cp: Int) -> Bool
+    if cp >= 33 and cp <= 47 or cp >= 58 and cp <= 64 or cp >= 91 and cp <= 96 or cp >= 123 and cp <= 126
+        return true
+    cp < 1114112 and uclass.is_punctuation(cp)
+
+// Whether the code point is a CJK ideograph, by the block ranges BERT lists.
+fn is_cjk(cp: Int) -> Bool
+    cp >= 19968 and cp <= 40959 or cp >= 13312 and cp <= 19903
+        or cp >= 131072 and cp <= 173791 or cp >= 173824 and cp <= 177983
+        or cp >= 177984 and cp <= 178207 or cp >= 178208 and cp <= 183983
+        or cp >= 63744 and cp <= 64255 or cp >= 194560 and cp <= 195103
+
+// Whether the code point is in a Unicode "other" category: control,
+// format, private use or unassigned.  A surrogate cannot occur, because
+// the reader takes an encoded surrogate for invalid bytes.
+fn is_other(d: udata.UniData, cp: Int) -> Bool
+    if cp >= 1114112
+        return false
+    match uclass.category(d, cp)
+        CatControl    => true
+        CatFormat     => true
+        CatPrivateUse => true
+        CatUnassigned => true
+        _             => false
+
+// One code point through the normaliser: the text it becomes, which is
+// empty when the character is dropped.
+fn normalize_char(n: TokNormalizer, d: udata.UniData, cp: Int) -> Str
+    if n.clean_whitespace
+        if cp == 0 or cp == 65533
+            return ""
+        if tokutf8.is_space(cp)
+            return " "
+        if cp != 9 and cp != 10 and cp != 13 and is_other(d, cp)
+            return ""
+    var out = tokutf8.encode(cp)
+    if n.split_cjk and is_cjk(cp)
+        out = " " + out + " "
+    if cp < 128
+        if n.lowercase and cp >= 65 and cp <= 90
+            return str.from_char(cp + 32)
+        return out
+    if n.strip_accents
+        out = without_marks(d, unorm.normalize(d, out, FormNfd))
+    if n.lowercase
+        out = ucase.to_lower(d, out, ucase.LANG_ROOT)
+    out
+
+// The text without its non-spacing marks.
+fn without_marks(d: udata.UniData, text: Str) -> Str
+    let sb = str.builder_new()
+    for cp in tokutf8.codes(text)
+        if cp >= 1114112 or uclass.category(d, cp) != CatNonspacingMark
+            str.builder_append(sb, tokutf8.encode(cp))
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+// The normalised text, and for each of its bytes the span of the original
+// text it came from: the start of the character in the first list and the
+// end of that character in the second.  White space is written as one
+// space and trimmed at the ends when the rules ask for it.
+fn normalize_mapped(n: TokNormalizer, text: Str) -> (Str, [Int], [Int])
+    let d = udata.data_full()
+    let cps = tokutf8.codes(text)
+    let starts = tokutf8.starts(text)
+    let sb = str.builder_new()
+    var from: [Int] = []
+    var to: [Int] = []
+    var pending = false
+    for k in 0..list.len(cps)
+        let piece = normalize_char(n, d, cps[k])
+        if str.is_empty(piece)
+            continue
+        for ch in tokutf8.codes(piece)
+            if n.clean_whitespace and tokutf8.is_space(ch)
+                // A space the rules collapse is written once, before the next
+                // character that is not a space, and never at the start or end.
+                pending = str.builder_len(sb) > 0
+            else
+                if pending
+                    str.builder_append_char(sb, 32)
+                    list.push(from, starts[k])
+                    list.push(to, starts[k])
+                    pending = false
+                let text_of = tokutf8.encode(ch)
+                str.builder_append(sb, text_of)
+                for _ in 0..str.len(text_of)
+                    list.push(from, starts[k])
+                    list.push(to, starts[k + 1])
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    (out, from, to)
+
+// The pieces of the text and where each one sits in it, as `start, length`
+// pairs in bytes of the original text.
+//
+// An added token is one piece covering its own text.  A word that cannot
+// be pieced is one unknown piece covering the whole word.
+//
+// ```novo
+// use tokpiece
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let w = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a"]), 0)
+//     let (pieces, spans) = tokpiece.pieces_with_spans(w, "a")
+//     println("${list.len(pieces)} ${list.len(spans)}")
+// ```
+pub fn pieces_with_spans(w: TokWordPiece, text: Str) -> ([Str], [Int])
+    var pieces: [Str] = []
+    var spans: [Int] = []
+    let cuts = tokvocab.split_on_added(w.vocab, text)
+    for t in 0..list.len(cuts) / 3
+        let lo = cuts[3 * t]
+        let hi = cuts[3 * t + 1]
+        if cuts[3 * t + 2] >= 0
+            list.push(pieces, str.slice(text, lo, hi))
+            list.push(spans, lo)
+            list.push(spans, hi - lo)
+        else
+            add_stretch(w, str.slice(text, lo, hi), lo, var pieces, var spans)
+    (pieces, spans)
+
+fn add_stretch(w: TokWordPiece, stretch: Str, base: Int, var pieces: [Str], var spans: [Int])
+    let (norm, from, to) = normalize_mapped(w.normalizer, stretch)
+    let cps = tokutf8.codes(norm)
+    let starts = tokutf8.starts(norm)
+    var word_start = 0 - 1
+    for k in 0..list.len(cps) + 1
+        let at_end = k == list.len(cps)
+        let space = not at_end and tokutf8.is_space(cps[k])
+        let punct = not at_end and w.normalizer.split_punctuation and is_punctuation(cps[k])
+        if word_start >= 0 and (at_end or space or punct)
+            add_word(w,
+                str.slice(norm, starts[word_start], starts[k]),
+                starts[word_start],
+                base,
+                from,
+                to,
+                var pieces,
+                var spans)
+            word_start = 0 - 1
+        if punct
+            add_word(w,
+                str.slice(norm, starts[k], starts[k + 1]),
+                starts[k],
+                base,
+                from,
+                to,
+                var pieces,
+                var spans)
+        else
+            if not at_end and not space and word_start < 0
+                word_start = k
+
+fn add_word(w: TokWordPiece, word: Str, at: Int, base: Int, from: [Int], to: [Int],
+            var pieces: [Str], var spans: [Int])
+    var off = at
+    let parts = piece_word(w, word)
+    let whole = list.len(parts) == 1 and (str.len(parts[0]) != str.len(word) or tokvocab.id_of(w.vocab, parts[0]) == w.unk_id)
+    for part in parts
+        var body = part
+        if off > at and str.starts_with(part, w.continuation)
+            body = str.slice(part, str.len(w.continuation), str.len(part))
+        var width = str.len(body)
+        if whole
+            off = at
+            width = str.len(word)
+        list.push(pieces, part)
+        list.push(spans, base + from[off])
+        list.push(spans, to[off + width - 1] - from[off])
+        off = off + width

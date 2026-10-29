@@ -7,16 +7,11 @@ This package brings all three to novo-lang behind one type, following
 HuggingFace's [tokenizers](https://github.com/huggingface/tokenizers) for
 the API shape and the `tokenizer.json` format, and
 [sentencepiece](https://github.com/google/sentencepiece) for the unigram
-model. It has no dependencies.
+model. It depends on [unicode-nv](https://novo-lang.org/packages/unicode-nv)
+for character classes, decomposition and lower-casing.
 [prompt-nv](https://novo-lang.org/packages/prompt-nv) and
 [llm-client-nv](https://novo-lang.org/packages/llm-client-nv) take the
 token count this package gives.
-
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
 
 ## What it is
 
@@ -63,13 +58,13 @@ a device with it in flash.
 The pre-tokenizer rules, which differ between families that otherwise use
 the same algorithm:
 
-| Rule | Contractions | Longest digit run |
-| --- | --- | --- |
-| `TokPretokenGpt2` | case-sensitive | unbounded |
-| `TokPretokenLlama3` | case-insensitive | 3 |
-| `TokPretokenQwen2` | case-insensitive | 1 |
-| `TokPretokenWhitespace` | — | unbounded |
-| `TokPretokenNone` | — | unbounded |
+| Rule | Contractions | Longest digit run | Pattern |
+| --- | --- | --- | --- |
+| `TokPretokenGpt2` | case-sensitive | unbounded | GPT-2's |
+| `TokPretokenLlama3` | case-insensitive | 3 | the cl100k pattern |
+| `TokPretokenQwen2` | case-insensitive | 1 | the cl100k pattern with one digit |
+| `TokPretokenWhitespace` | — | unbounded | one space and the word after it |
+| `TokPretokenNone` | — | unbounded | the whole text |
 
 The four sequence templates:
 
@@ -80,9 +75,7 @@ The four sequence templates:
 | `TokTemplatePair` | beginning, the first sequence, separator, the second, end |
 | `TokTemplateBosOnly` | beginning only |
 
-Every function here is byte arithmetic and table lookup. Nothing opens a
-file, reaches the network or reads a clock, and there is not one effect row
-in the package.
+Nothing in the package opens a file, reaches the network or reads a clock.
 
 ## Install
 
@@ -120,10 +113,7 @@ fn main() [io]
         Err(f)  => println(f.message())
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: tokenizers-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -135,6 +125,7 @@ specification the implementation will have to satisfy.
 | `tokpiece` | WordPiece: the continuation prefix, the four normalisation rules, the whole-word piecing, and encode and decode. |
 | `tokspecial` | The six special-token roles as named fields, the four templates, and the readers that find them in a file. |
 | `tokmodel` | The three models behind one enum, the encoding value they all answer, and the batch, pad, truncate and streaming-decode calls. |
+| `tokutf8` | Reading a string as code points, and the letter, number and white space classes the pre-tokenizer and the normaliser use. |
 | `tokfault` | The seven ways loading or decoding fails, each naming the place in the input. |
 
 ## How to choose an entry point
@@ -195,7 +186,8 @@ the ids, for inspection and for a caller building something else.
 8. **`byte_fallback` is what makes a unigram model lossless.**
    `tokmodel.is_lossless` answers whether text survives a round trip
    through this model, and a unigram model without byte fallback replaces
-   anything it cannot represent with its unknown piece.
+   a run of characters it cannot represent with one unknown piece, as
+   SentencePiece does.
 9. **Normalisation is four independent decisions.** Lower-casing,
    accent-stripping, punctuation splitting and CJK splitting are separate
    fields, because models mix them. `tokpiece.bert_uncased_rules` and
@@ -215,18 +207,30 @@ the ids, for inspection and for a caller building something else.
     token strings, the byte offset of each token in the original text, each
     token's length there, the sequence each came from, and the attention
     mask. A token the template added has a length of zero, which is how a
-    caller tells one apart without comparing ids.
+    caller tells one apart without comparing ids. The offsets are in bytes,
+    so a token that is part of a multi-byte character covers only its
+    bytes.
 14. **`padded` and `truncated` are separate calls on the encoding.**
     Padding sets the attention mask to zero for what it added; truncation
     keeps the template's ids.
 
+15. **The SentencePiece dummy prefix belongs to the start of the text.**
+    With `add_dummy_prefix` on, one `▁` is added before the first word and
+    the text after an added token is left as it is.
+
 ## What is not included
 
+- **The normalizers of a `tokenizer.json`, other than WordPiece's.** NFC,
+  NFKC, case folding, space collapsing and prepending are not applied when
+  a file names them, so a caller whose model needs them normalizes the
+  text first. The `BertNormalizer` of a WordPiece model is applied.
+- **Pre-tokenizer patterns beyond the five rules.** A `tokenizer.json` whose
+  pattern is none of GPT-2's, Llama 3's or Qwen2's is refused, and so is a
+  BPE model with no byte-level step.
 - **A file system.** Every constructor takes text or values. `std.hf` and
   `std.fs` are how a caller gets them.
 - **A regular expression engine.** The pre-tokenizer patterns are written
-  out as named rules, which keeps the dependency list empty and each
-  pattern testable on its own.
+  out as named rules, so that each is testable on its own.
 - **A fourth algorithm.** The three here are what the reference
   implementation supports. A character tokenizer or a regex one would be a
   fourth variant of the enum and a branch in six functions.
@@ -267,47 +271,23 @@ the ids, for inspection and for a caller building something else.
 ## Tests
 
 ```bash
-novo test tests/tokenizer_tests.nv    # 32 tests: the three models and the vocabulary
+novo test                  # every suite under tests/
+bash tests/coverage.sh     # the measured line coverage of src/
 ```
 
-The expected values are the reference implementations' own. GPT-2's
-`"Hello, world!"` is six tokens with the ids OpenAI's tokenizer gives, and
-the byte-to-character map's fixed points are from the published table. The
-SentencePiece cases are the reference's own round-trip contract, with the
-best-path case worked by hand from three pieces and three scores so a
-reader can check the arithmetic. BERT's `unaffable` becoming
-`un ##aff ##able` is the example in the original paper.
+The expected values are the reference implementations' own.
 
-The tests compile today and fail at run, each on the
-`not implemented: tokenizers-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
+| Suite | What it asserts |
 | --- | --- |
-| `tokvocab.of_tokens`, `.of_lines`, `.of_json_object`, `.with_added`, `.added` | no |
-| `tokvocab.size`, `.id_of`, `.token_of`, `.has`, `.tokens_of`, `.is_dense` | no |
-| `tokvocab.longest_prefix`, `.match_added` | no |
-| `tokbpe.of_parts`, `.of_gpt2_files`, `.merge`, `.with_prefix_space`, `.merge_count`, `.rank_of` | no |
-| `tokbpe.byte_map`, `.bytes_to_alphabet`, `.alphabet_to_bytes` | no |
-| `tokbpe.pretokenize`, `.merge_word`, `.encode`, `.tokenize`, `.decode` | no |
-| `tokunigram.of_pieces`, `.of_json_pieces`, `.piece`, `.with_byte_fallback`, `.with_dummy_prefix`, `.score_of` | no |
-| `tokunigram.to_sentencepiece_space`, `.from_sentencepiece_space` | no |
-| `tokunigram.best_path`, `.best_score`, `.encode`, `.tokenize`, `.decode` | no |
-| `tokpiece.of_vocab`, `.of_vocab_text`, `.with_continuation`, `.with_normalizer`, `.with_max_word_len` | no |
-| `tokpiece.bert_uncased_rules`, `.bert_cased_rules`, `.no_normalization` | no |
-| `tokpiece.normalize`, `.split_words`, `.piece_word`, `.encode`, `.tokenize`, `.decode` | no |
-| `tokspecial.none`, `.of_names`, `.bert_names`, `.gpt2_names`, `.with_eos`, `.is_special` | no |
-| `tokspecial.of_added_tokens_json`, `.added_tokens_of_json` | no |
-| `tokspecial.template_ids`, `.pair_separator_ids` | no |
-| `tokmodel.of_tokenizer_json`, `.specials_of_tokenizer_json` | no |
-| `tokmodel.model_name`, `.vocab_of`, `.vocab_size`, `.is_lossless`, `.empty_encoding` | no |
-| `tokmodel.encode`, `.encode_with`, `.encode_pair`, `.encode_batch`, `.tokenize`, `.token_count` | no |
-| `tokmodel.padded`, `.truncated` | no |
-| `tokmodel.decode`, `.decode_skipping_specials`, `.decode_one`, `.decode_stream` | no |
-| `tokfault.is_load_error`, `TokFault.message` | no |
+| `tokenizer_tests.nv` | The behaviour of each module, from the references' published examples: the byte-to-character map, GPT-2's pre-tokenizer, merging by rank, the SentencePiece space rules, a Viterbi case worked by hand, BERT's `unaffable`. |
+| `oracle_tests.nv` | Ids and decodings recorded from HuggingFace tokenizers (byte-level BPE and WordPiece), sentencepiece (unigram, with and without byte fallback and the dummy prefix) and the `regex` module (the three pre-tokenizer patterns), over small vocabularies trained from a few sentences. `tests/oracle/gen_vectors.py` writes it. |
+| `edge_tests.nv` | The refusals, the invalid UTF-8 and the paths the vectors do not reach. |
+
+The same comparison was also run at full size against the cl100k_base
+vocabulary of 100,256 tokens, on 1,227 texts: the ids matched tiktoken and
+HuggingFace tokenizers on every one. Against sentencepiece's own unigram
+models the ids matched on 2,436 texts in four configurations, and against
+HuggingFace tokenizers' WordPiece, cased and uncased, on 1,232.
 
 ## Licence
 

@@ -1,10 +1,7 @@
 // tokenizer_tests.nv — the API suite for the three models and the
 // vocabulary they share.
 //
-// RED ON PURPOSE: every body is a `todo()`.
-//
-// THE VECTORS ARE THE REFERENCE IMPLEMENTATIONS' OWN, which is the
-// whole value of this file to the implementation lane:
+// The expected values are the reference implementations' own:
 //
 //   - **GPT-2's BPE.**  `"Hello, world!"` is six tokens and its ids are
 //     the ones OpenAI's tokenizer gives.  The byte-to-unicode map's
@@ -20,12 +17,12 @@
 //     example in the original paper and in every implementation's
 //     tests, and the all-or-nothing rule is the case beside it.
 //
-// A VECTOR WITH AN EXACT ID IN IT needs the real vocabulary, which this
-// suite does not ship — so those cases assert the SHAPE (how many
-// tokens, which pieces) and the implementation lane adds the id
-// assertions when it has the files.  The ones that need no vocabulary —
-// the byte map, the `▁` rules, the Viterbi arithmetic — assert exact
-// answers here.
+// A vector with an exact id in it needs a vocabulary, which this suite does
+// not ship, so those cases assert the shape: how many tokens, and which
+// pieces.  The exact ids, from small trained vocabularies, are in
+// `oracle_tests.nv`.  The cases that need no vocabulary, such as the byte
+// map, the `▁` rules and the Viterbi arithmetic, assert exact answers
+// here.
 //
 // THE ROW ON EVERY `@test` IS `[io]`, for `test.case` and nothing else.
 // That is the claim this package makes and the reference implementations
@@ -179,10 +176,11 @@ fn test_gpt2s_pretokenizer_splits_where_the_reference_does() [io]
     test.assert(list.len(c) == 2)
     test.assert(c[1] == "'t")
 
-    test.case("a run of spaces keeps all but the last with itself")
+    test.case("a run of spaces keeps all but the last with the word after it")
     let s = tokbpe.pretokenize(TokPretokenGpt2, "a    b")
-    test.assert(list.len(s) == 2)
-    test.assert(s[1] == "    b")
+    test.assert(list.len(s) == 3)
+    test.assert(s[1] == "   ")
+    test.assert(s[2] == " b")
 
     test.case("punctuation runs together")
     let q = tokbpe.pretokenize(TokPretokenGpt2, "hi!!!")
@@ -243,10 +241,9 @@ fn test_bpe_encoding_never_fails() [io]
 
 @test
 fn test_gpt2s_own_vectors_by_shape() [io]
-    // The real ids need the real vocabulary, which this suite does not
-    // ship; the implementation lane adds the id assertions when it has
-    // `vocab.json`.  The SHAPE is assertable here and is what the
-    // reference's own examples are about.
+    // The ids of a trained vocabulary are in `oracle_tests.nv`.  The shape
+    // is assertable without one, and is what the reference's own examples
+    // are about.
     let v = tokvocab.of_tokens(tokbpe.byte_map())
     let b = tokbpe.of_parts(v, [], TokPretokenGpt2)
 

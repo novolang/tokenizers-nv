@@ -32,6 +32,9 @@
 
 use tokvocab
 use tokfault
+use std.str
+use std.list
+use std.json
 
 // The named roles a model gives particular ids.
 //
@@ -94,7 +97,12 @@ pub enum TokTemplate
 //     println("${tokspecial.none().unk_id}")
 // ```
 pub fn none() -> TokSpecials
-    todo("tokenizers-nv.tokspecial.none")
+    TokSpecials { unk_id: 0 - 1,
+        bos_id: 0 - 1,
+        eos_id: 0 - 1,
+        pad_id: 0 - 1,
+        sep_id: 0 - 1,
+        mask_id: 0 - 1 }
 
 // The roles looked up by name in a vocabulary.
 //
@@ -111,7 +119,8 @@ pub fn none() -> TokSpecials
 // ```
 pub fn of_names(v: TokVocab, unk: Str, bos: Str, eos: Str, pad: Str, sep: Str,
                 mask: Str) -> TokSpecials
-    todo("tokenizers-nv.tokspecial.of_names")
+    TokSpecials { unk_id: lookup(v, unk), bos_id: lookup(v, bos), eos_id: lookup(v, eos),
+                  pad_id: lookup(v, pad), sep_id: lookup(v, sep), mask_id: lookup(v, mask) }
 
 // BERT's six names, looked up in a vocabulary.
 //
@@ -128,7 +137,7 @@ pub fn of_names(v: TokVocab, unk: Str, bos: Str, eos: Str, pad: Str, sep: Str,
 //     println("${tokspecial.bert_names(v).bos_id}")
 // ```
 pub fn bert_names(v: TokVocab) -> TokSpecials
-    todo("tokenizers-nv.tokspecial.bert_names")
+    of_names(v, "[UNK]", "[CLS]", "[SEP]", "[PAD]", "[SEP]", "[MASK]")
 
 // GPT-2's one name: `<|endoftext|>` as both beginning and end, and
 // nothing else.
@@ -141,7 +150,7 @@ pub fn bert_names(v: TokVocab) -> TokSpecials
 //     println("${tokspecial.gpt2_names(tokvocab.of_tokens(["<|endoftext|>"])).eos_id}")
 // ```
 pub fn gpt2_names(v: TokVocab) -> TokSpecials
-    todo("tokenizers-nv.tokspecial.gpt2_names")
+    of_names(v, "", "<|endoftext|>", "<|endoftext|>", "", "", "")
 
 // The roles from a `tokenizer.json`'s `added_tokens` array's text.
 //
@@ -157,8 +166,14 @@ pub fn gpt2_names(v: TokVocab) -> TokSpecials
 //         Ok(s)  => println("${s.eos_id}")
 //         Err(_) => println("refused")
 // ```
-pub fn of_added_tokens_json(json: Str) -> Result<TokSpecials, TokFault>
-    todo("tokenizers-nv.tokspecial.of_added_tokens_json")
+pub fn of_added_tokens_json(added_json: Str) -> Result<TokSpecials, TokFault>
+    let added = added_tokens_of_json(added_json)!
+    var roles = none()
+    var rank = [999, 999, 999, 999, 999, 999]
+    for a in added
+        roles = fill_role(roles, rank, a)
+        rank = rank_after(rank, a)
+    Ok(roles)
 
 // The added tokens a `tokenizer.json`'s `added_tokens` array describes.
 //
@@ -174,8 +189,19 @@ pub fn of_added_tokens_json(json: Str) -> Result<TokSpecials, TokFault>
 //         Ok(a)  => println("${list.len(a)}")
 //         Err(_) => println("refused")
 // ```
-pub fn added_tokens_of_json(json: Str) -> Result<[TokAddedToken], TokFault>
-    todo("tokenizers-nv.tokspecial.added_tokens_of_json")
+pub fn added_tokens_of_json(added_json: Str) -> Result<[TokAddedToken], TokFault>
+    let Some(root) = json.parse(added_json) else return Err(TokMalformedJson(0, "well-formed JSON"))
+    let Some(items) = json.to_list(root) else return Err(TokMalformedJson(0, "an array of added tokens"))
+    var out: [TokAddedToken] = []
+    for item in items
+        let Some(content) = json.get_str(item, "content") else return Err(TokMalformedJson(0, "an added token with a 'content' string"))
+        let Some(id) = json.get_int(item, "id") else return Err(TokMalformedJson(0, "an added token with an integer 'id'"))
+        if id < 0
+            return Err(TokBadVocabEntry(content, id))
+        let special = json.get_bool(item, "special") ?? false
+        let strip = (json.get_bool(item, "lstrip") ?? false) or (json.get_bool(item, "rstrip") ?? false)
+        list.push(out, TokAddedToken { content: content, id: id, special: special, strip_spaces: strip })
+    Ok(out)
 
 // The same roles with a different end-of-sequence id.
 //
@@ -189,7 +215,8 @@ pub fn added_tokens_of_json(json: Str) -> Result<[TokAddedToken], TokFault>
 //     println("${tokspecial.with_eos(tokspecial.none(), 7).eos_id}")
 // ```
 pub fn with_eos(s: TokSpecials, id: Int) -> TokSpecials
-    todo("tokenizers-nv.tokspecial.with_eos")
+    TokSpecials { unk_id: s.unk_id, bos_id: s.bos_id, eos_id: id, pad_id: s.pad_id,
+                  sep_id: s.sep_id, mask_id: s.mask_id }
 
 // Whether an id is one of the six named roles.
 //
@@ -204,7 +231,8 @@ pub fn with_eos(s: TokSpecials, id: Int) -> TokSpecials
 //     println("${tokspecial.is_special(tokspecial.none(), 0)}")
 // ```
 pub fn is_special(s: TokSpecials, id: Int) -> Bool
-    todo("tokenizers-nv.tokspecial.is_special")
+    id >= 0 and (id == s.unk_id or id == s.bos_id or id == s.eos_id or id == s.pad_id
+                 or id == s.sep_id or id == s.mask_id)
 
 // The ids a template puts around a sequence: what goes before, and what
 // goes after.
@@ -222,7 +250,11 @@ pub fn is_special(s: TokSpecials, id: Int) -> Bool
 //     println("${list.len(pre)} ${list.len(post)}")
 // ```
 pub fn template_ids(t: TokTemplate, s: TokSpecials) -> ([Int], [Int])
-    todo("tokenizers-nv.tokspecial.template_ids")
+    match t
+        TokTemplateNone    => ([], [])
+        TokTemplateSingle  => (present(s.bos_id), present(s.eos_id))
+        TokTemplatePair    => (present(s.bos_id), present(s.eos_id))
+        TokTemplateBosOnly => (present(s.bos_id), [])
 
 // The ids a pair template puts between two sequences.
 //
@@ -234,4 +266,54 @@ pub fn template_ids(t: TokTemplate, s: TokSpecials) -> ([Int], [Int])
 //     println("${list.len(tokspecial.pair_separator_ids(tokspecial.none()))}")
 // ```
 pub fn pair_separator_ids(s: TokSpecials) -> [Int]
-    todo("tokenizers-nv.tokspecial.pair_separator_ids")
+    present(s.sep_id)
+
+// The id of a named token, or -1 for the empty name or a missing token.
+fn lookup(v: TokVocab, name: Str) -> Int
+    if str.is_empty(name)
+        return 0 - 1
+    tokvocab.id_of(v, name)
+
+fn present(id: Int) -> [Int]
+    if id < 0
+        return []
+    [id]
+
+// The names each role is recognised by in an `added_tokens` array, best
+// first.
+fn names_of(role: Int) -> [Str]
+    if role == 0
+        return ["<unk>", "[UNK]", "<|unk|>"]
+    if role == 1
+        return ["<s>", "[CLS]", "<|begin_of_text|>", "<|startoftext|>", "<bos>"]
+    if role == 2
+        return ["</s>", "<|endoftext|>", "<|end_of_text|>", "<eos>", "[SEP]"]
+    if role == 3
+        return ["<pad>", "[PAD]", "<|pad|>"]
+    if role == 4
+        return ["[SEP]", "</s>", "<sep>"]
+    ["[MASK]", "<mask>"]
+
+// The position of a name among a role's names, or 999.
+fn position(role: Int, content: Str) -> Int
+    let names = names_of(role)
+    for k in 0..list.len(names)
+        if names[k] == content
+            return k
+    999
+
+fn fill_role(s: TokSpecials, rank: [Int], a: TokAddedToken) -> TokSpecials
+    TokSpecials {
+        unk_id: (if position(0, a.content) < rank[0] then a.id else s.unk_id),
+        bos_id: (if position(1, a.content) < rank[1] then a.id else s.bos_id),
+        eos_id: (if position(2, a.content) < rank[2] then a.id else s.eos_id),
+        pad_id: (if position(3, a.content) < rank[3] then a.id else s.pad_id),
+        sep_id: (if position(4, a.content) < rank[4] then a.id else s.sep_id),
+        mask_id: (if position(5, a.content) < rank[5] then a.id else s.mask_id) }
+
+fn rank_after(rank: [Int], a: TokAddedToken) -> [Int]
+    var out: [Int] = []
+    for role in 0..6
+        let p = position(role, a.content)
+        list.push(out, (if p < rank[role] then p else rank[role]))
+    out

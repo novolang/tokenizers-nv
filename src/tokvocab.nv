@@ -28,6 +28,10 @@
 //
 // NO EFFECTS.
 
+use tokfault
+use std.str
+use std.list
+
 // A token the caller added on top of the model's own vocabulary.
 //
 // The mechanism a chat template uses: `<|im_start|>` is not something
@@ -42,16 +46,14 @@
 // fn main() [io]
 //     println(tokvocab.added("<|endoftext|>", 50256, true).content)
 // ```
-use tokfault
-
 pub struct TokAddedToken
     // The literal text it matches.
     content: Str
     // The id it encodes to.
     id: Int
-    // Whether it is matched before the normal pipeline.  A SPECIAL added
-    // token is matched literally and never split; a non-special one is
-    // added to the vocabulary and can still be produced by merging.
+    // Whether it is control rather than text.  Every added token is matched
+    // literally in the input, before the model's own pipeline, and is never
+    // split.  A special one is also left out by `decode_skipping_specials`.
     special: Bool
     // Whether a single space on either side of it is eaten.  What a chat
     // template needs so that `"<|user|> hello"` does not tokenise a
@@ -92,7 +94,7 @@ pub struct TokVocab
 //     println("${tokvocab.size(tokvocab.of_tokens(["a", "b"]))}")
 // ```
 pub fn of_tokens(tokens: [Str]) -> TokVocab
-    todo("tokenizers-nv.tokvocab.of_tokens")
+    TokVocab { tokens: list.clone(tokens), sorted: sorted_index(tokens), added: [] }
 
 // A vocabulary from the TEXT of a `vocab.txt`: one token per line, id =
 // line number.
@@ -108,7 +110,20 @@ pub fn of_tokens(tokens: [Str]) -> TokVocab
 //     println("${tokvocab.size(tokvocab.of_lines("[PAD]\n[UNK]\nhello"))}")
 // ```
 pub fn of_lines(text: Str) -> TokVocab
-    todo("tokenizers-nv.tokvocab.of_lines")
+    if str.is_empty(text)
+        return of_tokens([])
+    var lines = str.split(text, "\n")
+    // A file ends with a newline, and the empty string after the last one is
+    // not a line.
+    if str.ends_with(text, "\n")
+        lines = list.take(lines, list.len(lines) - 1)
+    var out: [Str] = []
+    for line in lines
+        if str.ends_with(line, "\r")
+            list.push(out, str.slice(line, 0, str.len(line) - 1))
+        else
+            list.push(out, line)
+    of_tokens(out)
 
 // A vocabulary from a `{"token": id}` JSON object's text.
 //
@@ -126,7 +141,52 @@ pub fn of_lines(text: Str) -> TokVocab
 //         Err(_) => println("refused")
 // ```
 pub fn of_json_object(text: Str) -> Result<TokVocab, TokFault>
-    todo("tokenizers-nv.tokvocab.of_json_object")
+    let n = str.len(text)
+    var at = skip_blank(text, 0)
+    if str.byte_at_or(text, at, 0) != '{'
+        return Err(TokMalformedJson(at, "a JSON object"))
+    at = skip_blank(text, at + 1)
+    var keys: [Str] = []
+    var ids: [Int] = []
+    if str.byte_at_or(text, at, 0) == '}'
+        at = at + 1
+    else
+        while true
+            if str.byte_at_or(text, at, 0) != '"'
+                return Err(TokMalformedJson(at, "a quoted token"))
+            let (key, after_key) = scan_string(text, at)
+            if after_key < 0
+                return Err(TokMalformedJson(0 - after_key, "a well-formed string"))
+            at = skip_blank(text, after_key)
+            if str.byte_at_or(text, at, 0) != ':'
+                return Err(TokMalformedJson(at, "followed by ':'"))
+            at = skip_blank(text, at + 1)
+            let (id, after_id) = scan_int(text, at)
+            if after_id < 0
+                return Err(TokMalformedJson(at, "an integer id for '${key}'"))
+            list.push(keys, key)
+            list.push(ids, id)
+            at = skip_blank(text, after_id)
+            let sep = str.byte_at_or(text, at, 0)
+            at = skip_blank(text, at + 1)
+            if sep == '}'
+                break
+            if sep != ','
+                return Err(TokMalformedJson(at - 1, "followed by ',' or '}'"))
+    if skip_blank(text, at) != n
+        return Err(TokMalformedJson(skip_blank(text, at), "the end of the object"))
+    var slots: [Str] = []
+    var taken: [Bool] = []
+    for _ in 0..list.len(keys)
+        list.push(slots, "")
+        list.push(taken, false)
+    for k in 0..list.len(keys)
+        let id = ids[k]
+        if id < 0 or id >= list.len(keys) or taken[id]
+            return Err(TokBadVocabEntry(keys[k], id))
+        taken[id] = true
+        slots[id] = keys[k]
+    Ok(of_tokens(slots))
 
 // The same vocabulary with added tokens on top.
 //
@@ -138,7 +198,7 @@ pub fn of_json_object(text: Str) -> Result<TokVocab, TokFault>
 //     println("${list.len(tokvocab.with_added(v, []).added)}")
 // ```
 pub fn with_added(v: TokVocab, added: [TokAddedToken]) -> TokVocab
-    todo("tokenizers-nv.tokvocab.with_added")
+    TokVocab { tokens: v.tokens, sorted: v.sorted, added: list.clone(added) }
 
 // An added token.
 //
@@ -149,7 +209,7 @@ pub fn with_added(v: TokVocab, added: [TokAddedToken]) -> TokVocab
 //     println("${tokvocab.added("<|endoftext|>", 50256, true).id}")
 // ```
 pub fn added(content: Str, id: Int, special: Bool) -> TokAddedToken
-    todo("tokenizers-nv.tokvocab.added")
+    TokAddedToken { content: content, id: id, special: special, strip_spaces: false }
 
 // How many tokens the vocabulary has, added ones included.
 //
@@ -163,7 +223,11 @@ pub fn added(content: Str, id: Int, special: Bool) -> TokAddedToken
 //     println("${tokvocab.size(tokvocab.of_tokens(["a", "b"]))}")
 // ```
 pub fn size(v: TokVocab) -> Int
-    todo("tokenizers-nv.tokvocab.size")
+    var top = list.len(v.tokens)
+    for a in v.added
+        if a.id + 1 > top
+            top = a.id + 1
+    top
 
 // The id of a token, or -1 when the vocabulary has none.
 //
@@ -179,7 +243,13 @@ pub fn size(v: TokVocab) -> Int
 //     println("${tokvocab.id_of(tokvocab.of_tokens(["a", "b"]), "b")}")
 // ```
 pub fn id_of(v: TokVocab, token: Str) -> Int
-    todo("tokenizers-nv.tokvocab.id_of")
+    let at = index_of(v, token)
+    if at >= 0
+        return at
+    for a in v.added
+        if a.content == token
+            return a.id
+    0 - 1
 
 // The token an id names, or `""` when the id is outside the vocabulary.
 //
@@ -190,7 +260,12 @@ pub fn id_of(v: TokVocab, token: Str) -> Int
 //     println(tokvocab.token_of(tokvocab.of_tokens(["a", "b"]), 1))
 // ```
 pub fn token_of(v: TokVocab, id: Int) -> Str
-    todo("tokenizers-nv.tokvocab.token_of")
+    if id >= 0 and id < list.len(v.tokens)
+        return v.tokens[id]
+    for a in v.added
+        if a.id == id
+            return a.content
+    ""
 
 // Whether the vocabulary has this token.
 //
@@ -201,7 +276,7 @@ pub fn token_of(v: TokVocab, id: Int) -> Str
 //     println("${tokvocab.has(tokvocab.of_tokens(["a"]), "a")}")
 // ```
 pub fn has(v: TokVocab, token: Str) -> Bool
-    todo("tokenizers-nv.tokvocab.has")
+    id_of(v, token) >= 0
 
 // The longest token in the vocabulary that is a prefix of `text` at
 // `from`, and its id.
@@ -219,7 +294,20 @@ pub fn has(v: TokVocab, token: Str) -> Bool
 //     println("${tok} ${id}")
 // ```
 pub fn longest_prefix(v: TokVocab, text: Str, from: Int) -> (Str, Int)
-    todo("tokenizers-nv.tokvocab.longest_prefix")
+    let total = str.len(text)
+    if from < 0 or from >= total
+        return ("", 0 - 1)
+    var probe = str.slice(text, from, total)
+    while str.len(probe) > 0
+        let pos = upper_bound(v, probe)
+        if pos == 0
+            return ("", 0 - 1)
+        let best = v.tokens[v.sorted[pos - 1]]
+        let common = common_prefix_len(best, probe)
+        if common == str.len(best)
+            return (best, lowest_id(v, pos - 1, best))
+        probe = str.slice(probe, 0, common)
+    ("", 0 - 1)
 
 // The added token matching `text` at `from`, longest first, and its id.
 //
@@ -236,7 +324,10 @@ pub fn longest_prefix(v: TokVocab, text: Str, from: Int) -> (Str, Int)
 //     println("${tok} ${id}")
 // ```
 pub fn match_added(v: TokVocab, text: Str, from: Int) -> (Str, Int)
-    todo("tokenizers-nv.tokvocab.match_added")
+    let k = added_at(v, text, from)
+    if k < 0
+        return ("", 0 - 1)
+    (v.added[k].content, v.added[k].id)
 
 // Every token in the vocabulary, in id order.
 //
@@ -248,7 +339,11 @@ pub fn match_added(v: TokVocab, text: Str, from: Int) -> (Str, Int)
 //     println("${list.len(tokvocab.tokens_of(tokvocab.of_tokens(["a"])))}")
 // ```
 pub fn tokens_of(v: TokVocab) -> [Str]
-    todo("tokenizers-nv.tokvocab.tokens_of")
+    var out = list.clone(v.tokens)
+    let top = size(v)
+    for id in list.len(v.tokens)..top
+        list.push(out, token_of(v, id))
+    out
 
 // Whether every id from 0 to `size - 1` names a token.
 //
@@ -263,4 +358,234 @@ pub fn tokens_of(v: TokVocab) -> [Str]
 //     println("${tokvocab.is_dense(tokvocab.of_tokens(["a", "b"]))}")
 // ```
 pub fn is_dense(v: TokVocab) -> Bool
-    todo("tokenizers-nv.tokvocab.is_dense")
+    for id in 0..size(v)
+        if id >= list.len(v.tokens) and token_of(v, id) == ""
+            return false
+    true
+
+// The indices of `tokens` in byte order of the token each names.
+fn sorted_index(tokens: [Str]) -> [Int]
+    var idx: [Int] = []
+    for i in 0..list.len(tokens)
+        list.push(idx, i)
+    list.sort_by(idx, i => tokens[i])
+    idx
+
+// How many tokens are at or below `probe` in byte order.
+fn upper_bound(v: TokVocab, probe: Str) -> Int
+    var lo = 0
+    var hi = list.len(v.sorted)
+    while lo < hi
+        let mid = (lo + hi) / 2
+        if v.tokens[v.sorted[mid]] <= probe
+            lo = mid + 1
+        else
+            hi = mid
+    lo
+
+// The smallest id among the tokens equal to `token`, the last of which
+// sits at sorted position `last`.  A vocabulary with a repeated token
+// answers the first.
+fn lowest_id(v: TokVocab, last: Int, token: Str) -> Int
+    var best = v.sorted[last]
+    var at = last - 1
+    while at >= 0 and v.tokens[v.sorted[at]] == token
+        if v.sorted[at] < best
+            best = v.sorted[at]
+        at = at - 1
+    best
+
+// The id of `token` among the model's own tokens, or -1.
+fn index_of(v: TokVocab, token: Str) -> Int
+    let pos = upper_bound(v, token)
+    if pos == 0
+        return 0 - 1
+    if v.tokens[v.sorted[pos - 1]] != token
+        return 0 - 1
+    lowest_id(v, pos - 1, token)
+
+// How many leading bytes `a` and `b` share.
+fn common_prefix_len(a: Str, b: Str) -> Int
+    let n = if str.len(a) < str.len(b)
+        str.len(a)
+    else
+        str.len(b)
+    var i = 0
+    while i < n and str.byte_at_or(a, i, 0 - 1) == str.byte_at_or(b, i, 0 - 2)
+        i = i + 1
+    i
+
+// Whether `text` holds `piece` at byte offset `from`.
+fn starts_at(text: Str, from: Int, piece: Str) -> Bool
+    if from < 0 or from + str.len(piece) > str.len(text)
+        return false
+    str.slice(text, from, from + str.len(piece)) == piece
+
+// The text cut into the stretches that are added tokens and the stretches
+// between them, as a flat list of `start, end, id` triples in byte
+// offsets.
+//
+// A stretch between added tokens has the id -1.  At each position the
+// longest added token that matches there wins, as `match_added` answers.
+// An added token whose `strip_spaces` is set takes one space from the
+// stretch on either side of it.  Text that holds no added token comes
+// back as one stretch, and the empty text comes back as none.
+//
+// ```novo
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let v = tokvocab.with_added(tokvocab.of_tokens(["a"]), [tokvocab.added("<s>", 9, true)])
+//     println("${list.len(tokvocab.split_on_added(v, "x<s>y"))}")
+// ```
+pub fn split_on_added(v: TokVocab, text: Str) -> [Int]
+    var out: [Int] = []
+    let total = str.len(text)
+    if list.len(v.added) == 0
+        if total > 0
+            list.push(out, 0)
+            list.push(out, total)
+            list.push(out, 0 - 1)
+        return out
+    var gap = 0
+    var at = 0
+    while at < total
+        let k = added_at(v, text, at)
+        if k < 0
+            at = at + 1
+            continue
+        let tok = v.added[k].content
+        let id = v.added[k].id
+        let strip = v.added[k].strip_spaces
+        var gap_end = at
+        if strip and gap_end > gap and str.byte_at_or(text, gap_end - 1, 0) == 32
+            gap_end = gap_end - 1
+        if gap_end > gap
+            list.push(out, gap)
+            list.push(out, gap_end)
+            list.push(out, 0 - 1)
+        list.push(out, at)
+        list.push(out, at + str.len(tok))
+        list.push(out, id)
+        at = at + str.len(tok)
+        if strip and str.byte_at_or(text, at, 0) == 32
+            at = at + 1
+        gap = at
+    if gap < total
+        list.push(out, gap)
+        list.push(out, total)
+        list.push(out, 0 - 1)
+    out
+
+// The position in `added` of the longest added token that `text` holds at
+// `from`, or -1.
+fn added_at(v: TokVocab, text: Str, from: Int) -> Int
+    var best = 0 - 1
+    var best_len = 0
+    let lead = str.byte_at_or(text, from, 0 - 1)
+    for k in 0..list.len(v.added)
+        let content = v.added[k].content
+        let n = str.len(content)
+        if n > best_len and str.byte_at_or(content, 0, 0 - 2) == lead and starts_at(text, from, content)
+            best = k
+            best_len = n
+    best
+
+// The offset of the first byte at or after `at` that is not JSON
+// whitespace.
+fn skip_blank(text: Str, at: Int) -> Int
+    var i = at
+    while is_blank(str.byte_at_or(text, i, 0))
+        i = i + 1
+    i
+
+fn is_blank(b: Int) -> Bool
+    b == ' ' or b == '\n' or b == '\t' or b == '\r'
+
+// The string whose opening quote is at `at`, and the offset after its
+// closing quote.  A malformed string answers the negated offset of the
+// fault in the second value.
+fn scan_string(text: Str, at: Int) -> (Str, Int)
+    let sb = str.builder_new()
+    var i = at + 1
+    var failure = 0
+    while failure == 0
+        let b = str.byte_at_or(text, i, 0 - 1)
+        if b < 0
+            failure = i
+        else
+            if b == '"'
+                let out = str.builder_to_str(sb)
+                str.builder_drop(sb)
+                return (out, i + 1)
+            if b != '\\'
+                str.builder_append_char(sb, b)
+                i = i + 1
+            else
+                let e = str.byte_at_or(text, i + 1, 0)
+                i = i + 2
+                if e == 'n'
+                    str.builder_append_char(sb, 10)
+                else if e == 't'
+                    str.builder_append_char(sb, 9)
+                else if e == 'r'
+                    str.builder_append_char(sb, 13)
+                else if e == 'b'
+                    str.builder_append_char(sb, 8)
+                else if e == 'f'
+                    str.builder_append_char(sb, 12)
+                else if e == '"' or e == '\\' or e == '/'
+                    str.builder_append_char(sb, e)
+                else if e == 'u'
+                    var cp = hex4(text, i)
+                    i = i + 4
+                    if cp >= 55296 and cp < 56320 and str.byte_at_or(text, i, 0) == '\\' and str.byte_at_or(text, i + 1, 0) == 'u'
+                        let low = hex4(text, i + 2)
+                        if low >= 56320 and low < 57344
+                            cp = 65536 + ((cp - 55296) << 10) + (low - 56320)
+                            i = i + 6
+                    if cp < 0
+                        failure = i - 4
+                    else
+                        str.builder_append(sb, str.from_char(cp))
+                else
+                    failure = i - 2
+    str.builder_drop(sb)
+    ("", 0 - failure)
+
+// The value of the four hex digits at `at`, or -1.
+fn hex4(text: Str, at: Int) -> Int
+    var v = 0
+    for k in 0..4
+        let d = hex_digit(str.byte_at_or(text, at + k, 0))
+        if d < 0
+            return 0 - 1
+        v = v * 16 + d
+    v
+
+fn hex_digit(b: Int) -> Int
+    if b >= '0' and b <= '9'
+        return b - '0'
+    if b >= 'a' and b <= 'f'
+        return b - 'a' + 10
+    if b >= 'A' and b <= 'F'
+        return b - 'A' + 10
+    0 - 1
+
+// The integer at `at` and the offset after it, or -1 as the second value
+// when there is none.
+fn scan_int(text: Str, at: Int) -> (Int, Int)
+    var i = at
+    var neg = false
+    if str.byte_at_or(text, i, 0) == '-'
+        neg = true
+        i = i + 1
+    let first = i
+    var v = 0
+    while str.byte_at_or(text, i, 0) >= '0' and str.byte_at_or(text, i, 0) <= '9'
+        v = v * 10 + (str.byte_at_or(text, i, 0) - '0')
+        i = i + 1
+    if i == first
+        return (0, 0 - 1)
+    ((if neg then 0 - v else v), i)

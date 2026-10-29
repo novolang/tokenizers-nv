@@ -39,6 +39,10 @@
 
 use tokvocab
 use tokfault
+use tokutf8
+use std.str
+use std.list
+use std.json
 
 // One piece of a unigram vocabulary: its text and its score.
 //
@@ -85,6 +89,9 @@ pub struct TokUnigram
     // segmenting.  SentencePiece's `add_dummy_prefix`, on by default —
     // which is why `"hello"` and `" hello"` usually tokenise the same.
     add_dummy_prefix: Bool
+    // The lowest score among the pieces other than the unknown one.  A
+    // character no piece covers scores a fixed penalty below it.
+    min_score: Float
 
 // A unigram tokenizer from pieces and scores.
 //
@@ -96,7 +103,14 @@ pub struct TokUnigram
 //     println("${tokunigram.of_pieces(tokvocab.of_tokens(["a"]), [0.0], 0).unk_id}")
 // ```
 pub fn of_pieces(vocab: TokVocab, scores: [Float], unk_id: Int) -> TokUnigram
-    todo("tokenizers-nv.tokunigram.of_pieces")
+    var low = 0.0
+    var first = true
+    for k in 0..list.len(scores)
+        if k != unk_id and (first or scores[k] < low)
+            low = scores[k]
+            first = false
+    TokUnigram { vocab: vocab, scores: list.clone(scores), unk_id: unk_id, byte_fallback: false,
+                 add_dummy_prefix: true, min_score: low }
 
 // A unigram tokenizer from a `tokenizer.json`'s `model.vocab` array:
 // `[["piece", score], …]`, id = position.
@@ -115,8 +129,22 @@ pub fn of_pieces(vocab: TokVocab, scores: [Float], unk_id: Int) -> TokUnigram
 //         Ok(u)  => println("${u.unk_id}")
 //         Err(_) => println("refused")
 // ```
-pub fn of_json_pieces(json: Str, unk_id: Int) -> Result<TokUnigram, TokFault>
-    todo("tokenizers-nv.tokunigram.of_json_pieces")
+pub fn of_json_pieces(pieces_json: Str, unk_id: Int) -> Result<TokUnigram, TokFault>
+    let Some(root) = json.parse(pieces_json) else return Err(TokMalformedJson(0, "well-formed JSON"))
+    let Some(items) = json.to_list(root) else return Err(TokMalformedJson(0, "an array of [piece, score] pairs"))
+    var pieces: [Str] = []
+    var scores: [Float] = []
+    for item in items
+        let Some(entry) = json.to_list(item) else return Err(TokMalformedJson(0, "a [piece, score] pair"))
+        if list.len(entry) == 0
+            return Err(TokMalformedJson(0, "a [piece, score] pair"))
+        let Some(text) = json.to_str(entry[0]) else return Err(TokMalformedJson(0, "a string piece"))
+        if list.len(entry) < 2
+            return Err(TokMissingScore(text))
+        let Some(score) = json.to_float(entry[1]) else return Err(TokMissingScore(text))
+        list.push(pieces, text)
+        list.push(scores, score)
+    Ok(of_pieces(tokvocab.of_tokens(pieces), scores, unk_id))
 
 // A piece and its score.
 //
@@ -127,7 +155,7 @@ pub fn of_json_pieces(json: Str, unk_id: Int) -> Result<TokUnigram, TokFault>
 //     println(tokunigram.piece("▁the", 0.0 - 3.5).text)
 // ```
 pub fn piece(text: Str, score: Float) -> TokPiece
-    todo("tokenizers-nv.tokunigram.piece")
+    TokPiece { text: text, score: score }
 
 // The same tokenizer with byte fallback on or off.
 //
@@ -140,7 +168,8 @@ pub fn piece(text: Str, score: Float) -> TokPiece
 //     println("${tokunigram.with_byte_fallback(u, true).byte_fallback}")
 // ```
 pub fn with_byte_fallback(u: TokUnigram, on: Bool) -> TokUnigram
-    todo("tokenizers-nv.tokunigram.with_byte_fallback")
+    TokUnigram { vocab: u.vocab, scores: u.scores, unk_id: u.unk_id, byte_fallback: on,
+                 add_dummy_prefix: u.add_dummy_prefix, min_score: u.min_score }
 
 // The same tokenizer with the dummy prefix on or off.
 //
@@ -153,7 +182,8 @@ pub fn with_byte_fallback(u: TokUnigram, on: Bool) -> TokUnigram
 //     println("${tokunigram.with_dummy_prefix(u, false).add_dummy_prefix}")
 // ```
 pub fn with_dummy_prefix(u: TokUnigram, on: Bool) -> TokUnigram
-    todo("tokenizers-nv.tokunigram.with_dummy_prefix")
+    TokUnigram { vocab: u.vocab, scores: u.scores, unk_id: u.unk_id, byte_fallback: u.byte_fallback,
+                 add_dummy_prefix: on, min_score: u.min_score }
 
 // The score of a piece, or the most negative number when the vocabulary
 // has none.
@@ -171,7 +201,10 @@ pub fn with_dummy_prefix(u: TokUnigram, on: Bool) -> TokUnigram
 //     println("${tokunigram.score_of(u, "a")}")
 // ```
 pub fn score_of(u: TokUnigram, piece: Str) -> Float
-    todo("tokenizers-nv.tokunigram.score_of")
+    let id = tokvocab.id_of(u.vocab, piece)
+    if id < 0 or id >= list.len(u.scores)
+        return IMPOSSIBLE
+    u.scores[id]
 
 // Text with every space written as `▁` and, if asked, one added at the
 // start.
@@ -188,7 +221,10 @@ pub fn score_of(u: TokUnigram, piece: Str) -> Float
 //     println(tokunigram.to_sentencepiece_space("hello world", true))
 // ```
 pub fn to_sentencepiece_space(text: Str, add_dummy_prefix: Bool) -> Str
-    todo("tokenizers-nv.tokunigram.to_sentencepiece_space")
+    let spaced = str.replace(text, " ", MARK)
+    if add_dummy_prefix
+        return MARK + spaced
+    spaced
 
 // A `▁`-spaced string back to ordinary text.
 //
@@ -203,9 +239,15 @@ pub fn to_sentencepiece_space(text: Str, add_dummy_prefix: Bool) -> Str
 //     println(tokunigram.from_sentencepiece_space("▁hello▁world"))
 // ```
 pub fn from_sentencepiece_space(text: Str) -> Str
-    todo("tokenizers-nv.tokunigram.from_sentencepiece_space")
+    let spaced = if str.starts_with(text, MARK)
+        str.slice(text, str.len(MARK), str.len(text))
+    else
+        text
+    str.replace(spaced, MARK, " ")
 
-// The best segmentation of one `▁`-spaced string, as pieces.
+// The best segmentation of one `▁`-spaced string, as pieces.  A run of
+// neighbouring characters that no piece spells is one piece, written as the
+// characters themselves.
 //
 // THE VITERBI PASS, public because it is the algorithm and the thing to
 // test: a segmentation that differs from the reference's differs here,
@@ -221,7 +263,8 @@ pub fn from_sentencepiece_space(text: Str) -> Str
 //     println("${list.len(tokunigram.best_path(u, "▁hello"))}")
 // ```
 pub fn best_path(u: TokUnigram, text: Str) -> [Str]
-    todo("tokenizers-nv.tokunigram.best_path")
+    let (pieces, _) = segment(u, text)
+    pieces
 
 // The score the best segmentation achieves: the sum of its pieces' log
 // probabilities.
@@ -239,14 +282,26 @@ pub fn best_path(u: TokUnigram, text: Str) -> [Str]
 //     println("${tokunigram.best_score(u, "▁hello")}")
 // ```
 pub fn best_score(u: TokUnigram, text: Str) -> Float
-    todo("tokenizers-nv.tokunigram.best_score")
+    let n = str.len(text)
+    if n == 0
+        return 0.0
+    var total = 0.0
+    let (pieces, unknown) = segment(u, text)
+    for k in 0..list.len(pieces)
+        let score = if unknown[k]
+            u.min_score - UNK_PENALTY
+        else
+            piece_score(u, pieces[k])
+        total = round32(total + round32(score))
+    total
 
 // Text as token ids.
 //
-// Total when `byte_fallback` is on.  With it off, bytes no piece covers
-// become one `<unk>` each and are not recoverable — which is the older
-// SentencePiece behaviour and the reason `byte_fallback` is a field
-// rather than an assumption.
+// Total when `byte_fallback` is on: a character no piece spells is written
+// as the `<0xNN>` pieces of its bytes.  With it off, a run of neighbouring
+// characters no piece spells becomes one `<unk>` and is not recoverable,
+// which is the older SentencePiece behaviour and the reason `byte_fallback`
+// is a field rather than an assumption.
 //
 // ```novo
 // use tokunigram
@@ -258,7 +313,8 @@ pub fn best_score(u: TokUnigram, text: Str) -> Float
 //     println("${list.len(tokunigram.encode(u, "hello"))}")
 // ```
 pub fn encode(u: TokUnigram, text: Str) -> [Int]
-    todo("tokenizers-nv.tokunigram.encode")
+    let (ids, _, _) = pieces_with_spans(u, text)
+    ids
 
 // Text as token strings, `▁` and all.
 //
@@ -272,7 +328,8 @@ pub fn encode(u: TokUnigram, text: Str) -> [Int]
 //     println("${list.len(tokunigram.tokenize(u, "hello"))}")
 // ```
 pub fn tokenize(u: TokUnigram, text: Str) -> [Str]
-    todo("tokenizers-nv.tokunigram.tokenize")
+    let (_, tokens, _) = pieces_with_spans(u, text)
+    tokens
 
 // Token ids back to text, with `▁` turned back into spaces.
 //
@@ -287,4 +344,230 @@ pub fn tokenize(u: TokUnigram, text: Str) -> [Str]
 //         Err(_) => println("refused")
 // ```
 pub fn decode(u: TokUnigram, ids: [Int]) -> Result<Str, TokFault>
-    todo("tokenizers-nv.tokunigram.decode")
+    let sb = str.builder_new()
+    var failure: ?TokFault = None
+    for id in ids
+        if id < 0 or id >= tokvocab.size(u.vocab)
+            failure = Some(TokIdOutOfRange(id, tokvocab.size(u.vocab)))
+            break
+        let piece = tokvocab.token_of(u.vocab, id)
+        let byte = byte_of_piece(piece)
+        if byte >= 0
+            str.builder_append_char(sb, byte)
+        else
+            str.builder_append(sb, piece)
+    let joined = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    match failure
+        Some(f) => Err(f)
+        None    =>
+            let text = if u.add_dummy_prefix
+                from_sentencepiece_space(joined)
+            else
+                str.replace(joined, MARK, " ")
+            Ok(text)
+
+// The character that stands for a space, U+2581 LOWER ONE EIGHTH BLOCK.
+const MARK = "▁"
+
+// SentencePiece scores a character no piece covers at this much below the
+// lowest piece score.
+const UNK_PENALTY = 10.0
+
+// The score of a segmentation that cannot be made.  It is far below any sum
+// of real scores and still a number that `+` leaves alone.
+const IMPOSSIBLE = 0.0 - 1.0e18
+
+fn score_at(u: TokUnigram, id: Int) -> Float
+    if id < list.len(u.scores)
+        return u.scores[id]
+    IMPOSSIBLE
+
+// The score of a piece the vocabulary spells.
+fn piece_score(u: TokUnigram, piece: Str) -> Float
+    score_at(u, tokvocab.id_of(u.vocab, piece))
+
+// The ids a character that no piece covers is encoded as: its bytes when the
+// model has byte fallback and carries them, otherwise the unknown id.
+fn unknown_ids(u: TokUnigram, text: Str) -> [Int]
+    var out: [Int] = []
+    if u.byte_fallback
+        for k in 0..str.len(text)
+            let id = tokvocab.id_of(u.vocab, byte_piece(str.byte_at_or(text, k, 0)))
+            out = list.push(out, (if id >= 0 then id else u.unk_id))
+        return out
+    out = list.push(out, u.unk_id)
+    out
+
+// The name of the piece that stands for one byte: `<0x0A>`.
+fn byte_piece(b: Int) -> Str
+    let digits = "0123456789ABCDEF"
+    "<0x" + str.slice(digits, b >> 4, (b >> 4) + 1) + str.slice(digits, b & 15, (b & 15) + 1) + ">"
+
+// The byte a `<0xNN>` piece stands for, or -1 for any other piece.
+fn byte_of_piece(piece: Str) -> Int
+    if str.len(piece) != 6 or not str.starts_with(piece, "<0x") or not str.ends_with(piece, ">")
+        return 0 - 1
+    let hi = hex_value(str.byte_at_or(piece, 3, 0))
+    let lo = hex_value(str.byte_at_or(piece, 4, 0))
+    if hi < 0 or lo < 0
+        return 0 - 1
+    hi * 16 + lo
+
+fn hex_value(b: Int) -> Int
+    if b >= '0' and b <= '9'
+        return b - '0'
+    if b >= 'A' and b <= 'F'
+        return b - 'A' + 10
+    0 - 1
+
+// Rounds to the nearest 32-bit float.  SentencePiece keeps scores and sums
+// them in 32 bits, and two segmentations whose sums are equal in exact
+// arithmetic are told apart by that rounding.
+fn round32(x: Float) -> Float
+    let y = x as fp32
+    y as Float
+
+// The Viterbi pass: the pieces of the best segmentation of a `▁`-spaced
+// string, and for each whether it is a run of characters no piece covers.
+// Neighbouring uncovered characters are one piece, as SentencePiece joins
+// them.
+fn segment(u: TokUnigram, text: Str) -> ([Str], [Bool])
+    var out: [Str] = []
+    var unknown: [Bool] = []
+    let n = str.len(text)
+    if n == 0
+        return (out, unknown)
+    var best: [Float] = []
+    var from: [Int] = []
+    var via: [Int] = []
+    for _ in 0..n + 1
+        list.push(best, IMPOSSIBLE)
+        list.push(from, 0 - 1)
+        list.push(via, 0 - 1)
+    best[0] = 0.0
+    let unk_score = round32(u.min_score - UNK_PENALTY)
+    var i = 0
+    while i < n
+        let width = tokutf8.length_at(text, i)
+        if best[i] > IMPOSSIBLE
+            var single = false
+            var probe = str.slice(text, i, n)
+            while str.len(probe) > 0
+                let (tok, id) = tokvocab.longest_prefix(u.vocab, probe, 0)
+                if id < 0
+                    break
+                let j = i + str.len(tok)
+                let score = round32(best[i] + round32(score_at(u, id)))
+                if score > best[j]
+                    best[j] = score
+                    from[j] = i
+                    via[j] = id
+                if str.len(tok) == width
+                    single = true
+                probe = str.slice(probe, 0, str.len(tok) - 1)
+            // A character no piece spells on its own is reachable as
+            // unknown, at the unknown score.
+            if not single
+                let j = i + width
+                let score = round32(best[i] + unk_score)
+                if score > best[j]
+                    best[j] = score
+                    from[j] = i
+                    via[j] = 0 - 1
+        i = i + width
+    var j = n
+    while j > 0 and from[j] >= 0
+        let start = from[j]
+        if via[j] < 0 and list.len(unknown) > 0 and unknown[list.len(unknown) - 1]
+            // The piece after this one is also unknown, so they are one.
+            out[list.len(out) - 1] = str.slice(text, start, j) + out[list.len(out) - 1]
+        else
+            list.push(out, str.slice(text, start, j))
+            list.push(unknown, via[j] < 0)
+        j = start
+    (list.rev(out), list.rev(unknown))
+
+// The ids and token strings of the text, and where each token sits in it as
+// `start, length` pairs in bytes of the original text.
+//
+// An added token is one token covering its own text.  The dummy prefix
+// belongs to the start of the whole text.  A character that is encoded as
+// several byte tokens gives each of them the character's span.
+//
+// ```novo
+// use tokunigram
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let u = tokunigram.of_pieces(tokvocab.of_tokens(["<unk>", "▁a"]), [0.0, 0.0 - 1.0], 0)
+//     let (ids, tokens, spans) = tokunigram.pieces_with_spans(u, "a")
+//     println("${list.len(ids)} ${list.len(tokens)} ${list.len(spans)}")
+// ```
+pub fn pieces_with_spans(u: TokUnigram, text: Str) -> ([Int], [Str], [Int])
+    var ids: [Int] = []
+    var tokens: [Str] = []
+    var spans: [Int] = []
+    let cuts = tokvocab.split_on_added(u.vocab, text)
+    for t in 0..list.len(cuts) / 3
+        let lo = cuts[3 * t]
+        let hi = cuts[3 * t + 1]
+        if cuts[3 * t + 2] >= 0
+            list.push(ids, cuts[3 * t + 2])
+            list.push(tokens, str.slice(text, lo, hi))
+            list.push(spans, lo)
+            list.push(spans, hi - lo)
+        else
+            add_stretch(u,
+                str.slice(text, lo, hi),
+                lo,
+                t == 0 and u.add_dummy_prefix,
+                var ids,
+                var tokens,
+                var spans)
+    (ids, tokens, spans)
+
+fn add_stretch(u: TokUnigram, stretch: Str, base: Int, prefix: Bool, var ids: [Int],
+               var tokens: [Str], var spans: [Int])
+    // The stretch with its spaces written as the mark, and for each byte of
+    // that the span of the original character it came from.
+    let sb = str.builder_new()
+    var from: [Int] = []
+    var to: [Int] = []
+    if prefix
+        str.builder_append(sb, MARK)
+        for _ in 0..str.len(MARK)
+            list.push(from, 0)
+            list.push(to, 0)
+    let cps = tokutf8.codes(stretch)
+    let starts = tokutf8.starts(stretch)
+    for k in 0..list.len(cps)
+        let piece = if cps[k] == 32
+            MARK
+        else
+            tokutf8.encode(cps[k])
+        str.builder_append(sb, piece)
+        for _ in 0..str.len(piece)
+            list.push(from, starts[k])
+            list.push(to, starts[k + 1])
+    let spaced = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    let (pieces, unknown) = segment(u, spaced)
+    var at = 0
+    for k in 0..list.len(pieces)
+        let width = str.len(pieces[k])
+        let found = if unknown[k]
+            []
+        else
+            [tokvocab.id_of(u.vocab, pieces[k])]
+        let these = if unknown[k]
+            unknown_ids(u, pieces[k])
+        else
+            found
+        for id in these
+            list.push(ids, id)
+            list.push(tokens, tokvocab.token_of(u.vocab, id))
+            list.push(spans, base + from[at])
+            list.push(spans, to[at + width - 1] - from[at])
+        at = at + width

@@ -88,4 +88,6 @@ impl Error for TokFault
 //     println("${tokfault.is_load_error(TokUnknownModel("Foo"))}")
 // ```
 pub fn is_load_error(f: TokFault) -> Bool
-    todo("tokenizers-nv.tokfault.is_load_error")
+    match f
+        TokIdOutOfRange(_, _) => false
+        _                     => true

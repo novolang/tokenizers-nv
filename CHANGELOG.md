@@ -5,6 +5,42 @@ All notable changes to tokenizers-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-10-29
+
+The first release with bodies, and `stability = "experimental"`.  Every function in the interface now does what its comment says.
+
+### Added
+
+- Byte-level BPE with the GPT-2, Llama 3 (cl100k), Qwen2 and white-space pre-tokenizer rules, added tokens, `add_prefix_space`, and `of_gpt2_files`.
+- SentencePiece unigram by Viterbi over 32-bit scores, with byte fallback, the dummy prefix, and one unknown piece for a run of uncovered characters.
+- WordPiece with BERT's normalisation done one character at a time, and offsets into the original text.
+- `tokmodel.of_tokenizer_json` for BPE, Unigram and WordPiece models, including `added_tokens`, the byte-level pre-tokenizer variants and the options of a WordPiece or Unigram model.
+- `tokutf8`, the code-point reader and character classes, with `tokvocab.split_on_added`, `tokbpe.pieces_with_spans`, `tokbpe.pretokenize_spans`, `tokpiece.pieces_with_spans` and `tokunigram.pieces_with_spans`, which the models share.
+
+### Changed
+
+- `unicode-nv` ^0.1.4 is now a dependency.  It supplies `\p{L}` and `\p{N}`, canonical decomposition and lowercase mapping.
+- `TokUnigram` has a new field, `min_score`, the lowest piece score, from which a character no piece spells is scored.
+- `TokPretokenLlama3` and `TokPretokenQwen2` follow the cl100k pattern: a word may follow one character that is not a letter, a number or a line break, symbols take the line breaks after them, and white space that ends in a line break is one piece.  Their comments said only that the contractions and the digit run differ.
+- `tokpiece.normalize` collapses white space and works on one character at a time, so the lowercase of a capital sigma is always `σ`.
+- Every added token is matched in the input, special or not; `special` decides only whether `decode_skipping_specials` leaves it out.
+- The parameter of `tokunigram.of_json_pieces` and of the two `tokspecial` readers that takes JSON text is named for what it holds, because `json` named the module.
+- A pre-tokenizer pattern for GPT-2 splits `"a    b"` into `a`, three spaces and ` b`, as the reference's regular expression does; the earlier test expected two pieces.
+
+### Measured
+
+- Line coverage of `src/` is 100%.
+- Against tiktoken and HuggingFace tokenizers on the cl100k_base vocabulary: the ids of 1,227 texts agree.
+- Against sentencepiece 4 unigram models (byte fallback and dummy prefix on and off): the ids of 2,436 texts agree.
+- Against HuggingFace tokenizers' WordPiece, cased and uncased: the ids of 1,232 texts agree.
+- Against the `regex` module on the three pre-tokenizer patterns: 9,096 splits agree.
+
+### Known differences from the references
+
+- A Unigram `tokenizer.json` names normalizers (NFKC, a space-collapsing replace, prepending) that this package does not apply, so its ids differ from HuggingFace tokenizers' unless the text is normalized first.  SentencePiece itself, with its normalization turned off, agrees.
+- With `add_dummy_prefix` on, a text that already starts with a space gets two marks, as SentencePiece gives it; HuggingFace's Metaspace adds one.
+- Offsets are in bytes, and a token that is part of a multi-byte character covers only its bytes.
+
 ## 0.0.3 — 2026-10-25
 
 A file that names a sibling module's type, function or constant now has the `use` line for that module (E2033, E2003).  No signature and no behaviour changed.

@@ -1,0 +1,788 @@
+// edge_tests.nv — the refusals, the unusual inputs and the paths the
+// reference vectors do not reach.
+//
+// Each answer here is stated from the rule in the module's header or from
+// the reference's documented behaviour, never from what the code printed.
+
+use std.test
+use std.list
+use std.str
+use tokutf8
+use tokvocab
+use tokbpe
+use tokunigram
+use tokpiece
+use tokspecial
+use tokmodel
+use tokfault
+
+// ── UTF-8 reading ───────────────────────────────────────────────────
+
+@test
+fn test_code_points_are_read_with_their_byte_offsets()
+    test.assert_eq(tokutf8.codes("aé日😀"), [97, 233, 26085, 128512])
+    test.assert_eq(tokutf8.starts("aé日😀"), [0, 1, 3, 6, 10])
+    test.assert_eq(tokutf8.length_at("é", 0), 2)
+    test.assert_eq(tokutf8.encode(233), "é")
+    test.assert_eq(tokutf8.code_at("aé", 1), 233)
+
+@test
+fn test_a_byte_that_is_not_a_complete_sequence_is_one_code_point_of_its_own()
+    let lone = str.from_byte(255)
+    test.assert_eq(tokutf8.codes(lone), [1114112 + 255])
+    test.assert_eq(tokutf8.encode(1114112 + 255), lone)
+    test.case("a continuation byte with no lead")
+    test.assert_eq(tokutf8.codes(str.from_byte(128)), [1114112 + 128])
+    test.case("a lead byte whose sequence is cut short")
+    test.assert_eq(list.len(tokutf8.codes("a" + str.from_byte(226) + str.from_byte(130))), 3)
+    test.case("an overlong encoding of '/' is two invalid bytes, not a slash")
+    test.assert_eq(tokutf8.codes(str.from_byte(192) + str.from_byte(175)), [1114112 + 192, 1114112 + 175])
+    test.case("a surrogate encoded in three bytes is invalid")
+    test.assert_eq(list.len(tokutf8.codes(str.from_byte(237) + str.from_byte(160) + str.from_byte(128))), 3)
+    test.case("and the classes hold for none of them")
+    test.assert(tokutf8.is_letter(1114112 + 200) == false)
+    test.assert(tokutf8.is_number(1114112 + 200) == false)
+    test.assert(tokutf8.is_space(1114112 + 200) == false)
+
+@test
+fn test_the_character_classes_follow_unicode()
+    test.assert(tokutf8.is_letter(233))
+    test.assert(tokutf8.is_letter(26085))
+    test.assert(tokutf8.is_letter(50) == false)
+    test.assert(tokutf8.is_number(50))
+    test.assert(tokutf8.is_number(178))
+    test.assert(tokutf8.is_number(97) == false)
+    test.assert(tokutf8.is_space(32))
+    test.assert(tokutf8.is_space(160))
+    test.assert(tokutf8.is_space(97) == false)
+
+// ── the vocabulary ──────────────────────────────────────────────────
+
+@test
+fn test_a_vocabulary_file_with_windows_line_ends_and_a_final_newline()
+    let v = tokvocab.of_lines("[PAD]\r\nhello\r\n")
+    test.assert_eq(tokvocab.size(v), 2)
+    test.assert_eq(tokvocab.token_of(v, 1), "hello")
+    test.assert_eq(tokvocab.size(tokvocab.of_lines("")), 0)
+
+@test
+fn test_a_repeated_token_answers_its_lowest_id()
+    let v = tokvocab.of_tokens(["b", "a", "b", "a"])
+    test.assert_eq(tokvocab.id_of(v, "a"), 1)
+    test.assert_eq(tokvocab.id_of(v, "b"), 0)
+    let (tok, id) = tokvocab.longest_prefix(v, "ab", 0)
+    test.assert_eq(tok, "a")
+    test.assert_eq(id, 1)
+
+@test
+fn test_longest_prefix_edges()
+    let v = tokvocab.of_tokens(["a", "abc", "b"])
+    test.case("a start past the end, or before the start, matches nothing")
+    test.assert_eq(tokvocab.longest_prefix(v, "abc", 3), ("", 0 - 1))
+    test.assert_eq(tokvocab.longest_prefix(v, "abc", 0 - 1), ("", 0 - 1))
+    test.case("a token that shares a prefix with the text but is not one is skipped")
+    let (tok, id) = tokvocab.longest_prefix(v, "abd", 0)
+    test.assert_eq(tok, "a")
+    test.assert_eq(id, 0)
+    test.case("text that sorts below every token matches nothing")
+    test.assert_eq(tokvocab.longest_prefix(v, "0", 0), ("", 0 - 1))
+
+@test
+fn test_added_tokens_extend_the_vocabulary()
+    let v = tokvocab.with_added(tokvocab.of_tokens(["a", "b"]), [
+        tokvocab.added("<x>", 7, true), tokvocab.added("<y>", 3, false)])
+    test.case("the size is one past the highest id")
+    test.assert_eq(tokvocab.size(v), 8)
+    test.case("a token is found by content and by id")
+    test.assert_eq(tokvocab.id_of(v, "<x>"), 7)
+    test.assert_eq(tokvocab.token_of(v, 7), "<x>")
+    test.assert_eq(tokvocab.token_of(v, 5), "")
+    test.assert(tokvocab.has(v, "<y>"))
+    test.case("a hole between the model's tokens and the added ones is not dense")
+    test.assert(tokvocab.is_dense(v) == false)
+    test.assert_eq(list.len(tokvocab.tokens_of(v)), 8)
+    test.assert_eq(tokvocab.tokens_of(v)[7], "<x>")
+    test.case("a vocabulary with its added tokens in sequence is dense")
+    let d = tokvocab.with_added(tokvocab.of_tokens(["a"]), [tokvocab.added("<x>", 1, true)])
+    test.assert(tokvocab.is_dense(d))
+
+@test
+fn test_text_is_cut_at_the_added_tokens()
+    let v = tokvocab.with_added(tokvocab.of_tokens(["a"]), [tokvocab.added("<s>", 9, true)])
+    test.assert_eq(tokvocab.split_on_added(v, "x<s>y<s>"), [0, 1, 0 - 1, 1, 4, 9, 4, 5, 0 - 1, 5, 8, 9])
+    test.assert_eq(tokvocab.split_on_added(v, "plain"), [0, 5, 0 - 1])
+    test.assert_eq(tokvocab.split_on_added(v, ""), [])
+    test.assert_eq(tokvocab.split_on_added(tokvocab.of_tokens(["a"]), "abc"), [0, 3, 0 - 1])
+    test.assert_eq(tokvocab.split_on_added(tokvocab.of_tokens(["a"]), ""), [])
+
+@test
+fn test_an_added_token_that_strips_spaces_eats_one_on_each_side()
+    let strip = TokAddedToken { content: "<s>", id: 9, special: true, strip_spaces: true }
+    let v = tokvocab.with_added(tokvocab.of_tokens(["a"]), [strip])
+    test.assert_eq(tokvocab.split_on_added(v, "x <s> y"), [0, 1, 0 - 1, 2, 5, 9, 6, 7, 0 - 1])
+    test.assert_eq(tokvocab.split_on_added(v, "<s>"), [0, 3, 9])
+
+@test
+fn test_a_json_vocabulary_is_read_with_json_escapes()
+    match tokvocab.of_json_object(" {\"a\\nb\": 0, \"\\t\\r\\b\\f\": 1, \"\\u00e9\": 2, \"\\ud83d\\ude00\": 3, \"q\\\"\\\\\\/\": 4 } ")
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            test.assert_eq(tokvocab.token_of(v, 0), "a\nb")
+            test.assert_eq(tokvocab.token_of(v, 1), "\t\r" + str.from_byte(8) + str.from_byte(12))
+            test.assert_eq(tokvocab.token_of(v, 2), "é")
+            test.assert_eq(tokvocab.token_of(v, 3), "😀")
+            test.assert_eq(tokvocab.token_of(v, 4), "q\"\\/")
+    test.case("an empty object is an empty vocabulary")
+    match tokvocab.of_json_object("{}")
+        Err(e) => test.fail(e.message())
+        Ok(v)  => test.assert_eq(tokvocab.size(v), 0)
+    test.case("a lone high surrogate is kept as the replacement character")
+    match tokvocab.of_json_object("{\"\\ud83dx\": 0}")
+        Err(e) => test.fail(e.message())
+        Ok(v)  => test.assert_eq(list.len(str.chars(tokvocab.token_of(v, 0))), 2)
+
+fn json_fault_of(text: Str) -> Str
+    match tokvocab.of_json_object(text)
+        Err(e) => e.message()
+        Ok(_)  => ""
+
+@test
+fn test_a_malformed_json_vocabulary_names_the_place()
+    test.assert(str.contains(json_fault_of("[1]"), "a JSON object"))
+    test.assert(str.contains(json_fault_of("{1: 0}"), "a quoted token"))
+    test.assert(str.contains(json_fault_of("{\"a\" 0}"), "':'"))
+    test.assert(str.contains(json_fault_of("{\"a\": x}"), "an integer id for 'a'"))
+    test.assert(str.contains(json_fault_of("{\"a\": 0 \"b\": 1}"), "',' or '}'"))
+    test.assert(str.contains(json_fault_of("{\"a\": 0} x"), "the end of the object"))
+    test.assert(str.contains(json_fault_of("{\"a"), "well-formed string"))
+    test.assert(str.contains(json_fault_of("{\"\\q\": 0}"), "well-formed string"))
+    test.assert(str.contains(json_fault_of("{\"\\u12G4\": 0}"), "well-formed string"))
+    test.assert(str.contains(json_fault_of("{\"a\": 1}"), "'a'"))
+    test.assert(str.contains(json_fault_of("{\"a\": -1}"), "-1"))
+    test.case("ids are read in the A-F range of a hex escape too")
+    test.assert_eq(json_fault_of("{\"\\u00E9\": 0, \"\\u00eA\": 1}"), "")
+
+// ── byte-level BPE ──────────────────────────────────────────────────
+
+@test
+fn test_the_byte_map_is_the_published_table()
+    let m = tokbpe.byte_map()
+    test.assert_eq(m[0], "Ā")
+    test.assert_eq(m[32], "Ġ")
+    test.assert_eq(m[126], "~")
+    test.assert_eq(m[127], "ġ")
+    test.assert_eq(m[160], "ł")
+    test.assert_eq(m[161], "¡")
+    test.assert_eq(m[173], "Ń")
+    test.assert_eq(m[174], "®")
+    test.assert_eq(m[255], "ÿ")
+    test.case("no two bytes share a character")
+    test.assert_eq(list.len(list.sort(list.clone(m))), 256)
+    var distinct = 0
+    var prev = ""
+    for c in list.sort(list.clone(m))
+        if c != prev
+            distinct = distinct + 1
+        prev = c
+    test.assert_eq(distinct, 256)
+
+@test
+fn test_every_byte_survives_the_map()
+    var all = ""
+    for b in 0..256
+        all = all + str.from_byte(b)
+    match tokbpe.alphabet_to_bytes(tokbpe.bytes_to_alphabet(all))
+        Ok(s)  => test.assert_eq(s, all)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_character_outside_the_map_is_refused_with_its_code_point()
+    match tokbpe.alphabet_to_bytes("a" + "€")
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "U+20AC"))
+    match tokbpe.alphabet_to_bytes(str.from_byte(255))
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "U+1100FF"))
+    match tokbpe.alphabet_to_bytes("ń")
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "U+0144"))
+    test.case("the ends of the extra range are mapped")
+    test.assert_eq(tokbpe.alphabet_to_bytes("Ā"), Ok(str.from_byte(0)))
+    test.assert_eq(tokbpe.alphabet_to_bytes("ŀ"), Ok(str.from_byte(158)))
+    test.assert_eq(tokbpe.alphabet_to_bytes("Ń"), Ok(str.from_byte(173)))
+
+fn small_bpe() -> TokBpe
+    let tokens = list.concat(tokbpe.byte_map(), ["he", "hel", "<|e|>"])
+    let merges = [tokbpe.merge("h", "e", 0), tokbpe.merge("he", "l", 1)]
+    tokbpe.of_parts(tokvocab.with_added(tokvocab.of_tokens(tokens), [tokvocab.added("<|e|>", 258, true)]),
+                    merges, TokPretokenGpt2)
+
+@test
+fn test_bpe_encodes_merges_and_added_tokens()
+    let b = small_bpe()
+    test.case("a merge applies")
+    test.assert_eq(tokbpe.tokenize(b, "hel"), ["hel"])
+    test.case("an added token is matched in the text and is one piece")
+    test.assert_eq(tokbpe.tokenize(b, "h<|e|>l"), ["h", "<|e|>", "l"])
+    test.case("and its span is its own text")
+    let (pieces, spans) = tokbpe.pieces_with_spans(b, "h<|e|>l")
+    test.assert_eq(spans, [0, 1, 1, 5, 6, 1])
+    test.assert_eq(list.len(pieces), 3)
+    test.case("it decodes to its own text, not through the byte map")
+    test.assert_eq(tokbpe.decode(b, tokbpe.encode(b, "h<|e|> l")), Ok("h<|e|> l"))
+    test.case("an id the vocabulary lacks is out of range")
+    match tokbpe.decode(b, [0, 999])
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "999"))
+    test.case("a token outside the byte alphabet cannot be decoded")
+    match tokbpe.decode(tokbpe.of_parts(tokvocab.of_tokens(["€"]), [], TokPretokenGpt2), [0])
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "byte"))
+
+@test
+fn test_a_vocabulary_missing_bytes_drops_what_it_cannot_name()
+    let v = tokvocab.of_tokens(["a", "b", "ab"])
+    let b = tokbpe.of_parts(v, [tokbpe.merge("a", "b", 0)], TokPretokenGpt2)
+    test.assert_eq(tokbpe.encode(b, "abz"), [2])
+    test.case("a merged piece the vocabulary lacks falls back to its characters")
+    let c = tokbpe.of_parts(tokvocab.of_tokens(["a", "b"]), [tokbpe.merge("a", "b", 0)], TokPretokenGpt2)
+    test.assert_eq(tokbpe.encode(c, "ab"), [0, 1])
+    test.assert_eq(tokbpe.encode(c, "azb"), [0, 1])
+    test.case("a dropped character moves the offsets of those after it")
+    let (_, spans) = tokbpe.pieces_with_spans(c, "azb")
+    test.assert_eq(spans, [0, 1, 2, 1])
+
+@test
+fn test_a_space_is_added_before_the_text_when_asked()
+    let b = tokbpe.with_prefix_space(small_bpe(), true)
+    test.assert_eq(tokbpe.tokenize(b, "hel"), ["Ġ", "hel"])
+    test.case("unless the text already starts with one, and the space is in no span")
+    test.assert_eq(tokbpe.tokenize(b, " hel"), ["Ġ", "hel"])
+    let (_, spans) = tokbpe.pieces_with_spans(b, "hel")
+    test.assert_eq(spans, [0, 0, 0, 3])
+    test.assert(b.add_prefix_space)
+
+@test
+fn test_a_merges_file_with_windows_line_ends()
+    match tokbpe.of_gpt2_files("{\"a\": 0, \"b\": 1, \"ab\": 2}", "#version: 0.2\r\na b\r\n", TokPretokenGpt2)
+        Ok(b)  => test.assert_eq(tokbpe.rank_of(b, "a", "b"), 0)
+        Err(e) => test.fail(e.message())
+    test.case("a blank line in the middle is not two pieces")
+    match tokbpe.of_gpt2_files("{\"a\": 0}", "a b\n\nc d\n", TokPretokenGpt2)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "merges line 2"))
+    test.case("a bad vocabulary is the vocabulary's refusal")
+    match tokbpe.of_gpt2_files("[", "", TokPretokenGpt2)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(tokfault.is_load_error(e))
+
+@test
+fn test_the_lowest_ranked_of_a_repeated_merge_wins()
+    let b = tokbpe.of_parts(tokvocab.of_tokens(["a", "b", "ab"]),
+                            [tokbpe.merge("a", "b", 4), tokbpe.merge("a", "b", 2), tokbpe.merge("b", "a", 3)],
+                            TokPretokenNone)
+    test.assert_eq(tokbpe.rank_of(b, "a", "b"), 2)
+    test.assert_eq(tokbpe.rank_of(b, "b", "a"), 3)
+    test.assert_eq(tokbpe.rank_of(b, "z", "z"), 0 - 1)
+    test.assert_eq(tokbpe.rank_of(b, "a", "a"), 0 - 1)
+
+@test
+fn test_pieces_are_joined_a_pair_at_a_time_left_to_right()
+    let b = tokbpe.of_parts(tokvocab.of_tokens(["a", "aa"]), [tokbpe.merge("a", "a", 0)], TokPretokenNone)
+    test.assert_eq(tokbpe.merge_word(b, "aaa"), ["aa", "a"])
+    test.assert_eq(tokbpe.merge_word(b, "aaaa"), ["aa", "aa"])
+    test.assert_eq(tokbpe.merge_word(b, ""), [])
+    test.assert_eq(tokbpe.merge_word(b, "a"), ["a"])
+
+@test
+fn test_the_pretokenizer_rules_on_the_awkward_cases()
+    test.case("GPT-2 leaves the last space of a run for the word after it")
+    test.assert_eq(tokbpe.pretokenize(TokPretokenGpt2, "a  \nb"), ["a", "  ", "\n", "b"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenGpt2, "a "), ["a", " "])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenGpt2, "'s 'RE"), ["'s", " '", "RE"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenGpt2, ""), [])
+    test.case("the cl100k rules keep a line break with the symbols before it")
+    test.assert_eq(tokbpe.pretokenize(TokPretokenLlama3, "a!!\n\nb"), ["a", "!!\n\n", "b"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenLlama3, "a \n b"), ["a", " \n", " b"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenLlama3, "'LL 1234567"), ["'LL", " ", "123", "456", "7"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenQwen2, "x\r\n"), ["x", "\r\n"])
+    test.case("an optional character before a word may be any symbol")
+    test.assert_eq(tokbpe.pretokenize(TokPretokenLlama3, "#tag $5"), ["#tag", " $", "5"])
+    test.case("the whitespace rule keeps one space with the word after it")
+    test.assert_eq(tokbpe.pretokenize(TokPretokenWhitespace, "a  b\n"), ["a", " ", " b", "\n"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenWhitespace, "  "), ["  "])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenWhitespace, " x"), [" x"])
+    test.case("a byte that is not UTF-8 is a symbol")
+    test.assert_eq(list.len(tokbpe.pretokenize(TokPretokenGpt2, "a" + str.from_byte(255) + "b")), 3)
+    test.assert_eq(tokbpe.pretokenize_spans(TokPretokenGpt2, "ab cd"), [0, 2, 2, 5])
+
+// ── unigram ─────────────────────────────────────────────────────────
+
+fn small_unigram() -> TokUnigram
+    let v = tokvocab.of_tokens(["<unk>", "▁a", "▁", "b", "<0x61>", "<0xE2>", "<0xZZ>", "<0x6g>", "<0x6"])
+    tokunigram.of_pieces(v, [0.0, 0.0 - 1.0, 0.0 - 2.0, 0.0 - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0)
+
+@test
+fn test_unigram_pieces_and_scores()
+    let u = small_unigram()
+    test.assert_eq(tokunigram.best_path(u, ""), [])
+    test.assert_eq(tokunigram.best_path(u, "▁ab"), ["▁a", "b"])
+    test.assert_eq(tokunigram.best_score(u, ""), 0.0)
+    test.assert_eq(tokunigram.best_score(u, "▁ab"), 0.0 - 2.0)
+    test.assert(tokunigram.score_of(u, "▁a") == 0.0 - 1.0)
+    test.case("the unknown piece is not counted when the lowest score is taken")
+    test.assert_eq(u.min_score, 0.0 - 2.0)
+
+@test
+fn test_a_run_of_uncovered_characters_is_one_unknown_piece()
+    let u = small_unigram()
+    test.assert_eq(tokunigram.best_path(u, "▁aΩΩb"), ["▁a", "ΩΩ", "b"])
+    test.assert_eq(tokunigram.encode(u, "aΩΩb"), [1, 0, 3])
+    test.case("its score is the unknown score, one penalty below the lowest piece")
+    test.assert_eq(tokunigram.best_score(u, "Ω"), 0.0 - 12.0)
+    test.assert_eq(tokunigram.best_score(u, "▁aΩb"), 0.0 - 14.0)
+    test.case("the token string of an unknown character is the unknown piece")
+    test.assert_eq(tokunigram.tokenize(u, "aΩ"), ["▁a", "<unk>"])
+
+@test
+fn test_byte_fallback_spells_an_uncovered_character_in_bytes()
+    let u = tokunigram.with_byte_fallback(small_unigram(), true)
+    test.case("a character whose byte pieces exist")
+    test.assert_eq(tokunigram.encode(u, "a" + str.from_byte(97)), [1, 4])
+    test.case("a byte the vocabulary has no piece for is the unknown id")
+    test.assert_eq(tokunigram.encode(u, "€"), [2, 5, 0, 0])
+
+@test
+fn test_unigram_decoding_reads_byte_pieces()
+    let u = small_unigram()
+    test.assert_eq(tokunigram.decode(u, [1, 3]), Ok("ab"))
+    test.assert_eq(tokunigram.decode(u, [2, 1]), Ok(" a"))
+    test.case("a byte piece is the byte")
+    test.assert_eq(tokunigram.decode(u, [1, 4]), Ok("aa"))
+    test.case("a piece that only looks like a byte piece is text")
+    test.assert_eq(tokunigram.decode(u, [6]), Ok("<0xZZ>"))
+    test.assert_eq(tokunigram.decode(u, [7]), Ok("<0x6g>"))
+    test.assert_eq(tokunigram.decode(u, [8]), Ok("<0x6"))
+    test.case("without the dummy prefix a leading mark is a space")
+    test.assert_eq(tokunigram.decode(tokunigram.with_dummy_prefix(u, false), [1]), Ok(" a"))
+    test.case("an id outside the vocabulary is refused")
+    match tokunigram.decode(u, [1, 99])
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "99"))
+    match tokunigram.decode(u, [0 - 1])
+        Ok(_)  => test.fail("accepted")
+        Err(_) => test.assert(true)
+
+@test
+fn test_unigram_pieces_from_json_are_checked()
+    match tokunigram.of_json_pieces("not json", 0)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(tokfault.is_load_error(e))
+    match tokunigram.of_json_pieces("{}", 0)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "array"))
+    match tokunigram.of_json_pieces("[3]", 0)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "pair"))
+    match tokunigram.of_json_pieces("[[]]", 0)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "pair"))
+    match tokunigram.of_json_pieces("[[1, 2.0]]", 0)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "string"))
+    match tokunigram.of_json_pieces("[[\"a\", \"x\"]]", 0)
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "'a'"))
+    test.case("an integer score is a score")
+    match tokunigram.of_json_pieces("[[\"<unk>\", 0], [\"a\", -2]]", 0)
+        Ok(u)  => test.assert_eq(tokunigram.score_of(u, "a"), 0.0 - 2.0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_unigram_added_tokens_and_spans()
+    let v = tokvocab.with_added(tokvocab.of_tokens(["<unk>", "a", "▁b", "▁a", "▁"]), [tokvocab.added("<s>", 7, true)])
+    let u = tokunigram.of_pieces(v, [0.0, 0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0, 0.0 - 2.0], 0)
+    test.case("an added token is one id, and the dummy prefix belongs to the first stretch only")
+    let (ids, tokens, spans) = tokunigram.pieces_with_spans(u, "<s>a b")
+    test.assert_eq(ids, [7, 1, 2])
+    test.assert_eq(tokens, ["<s>", "a", "▁b"])
+    test.assert_eq(spans, [0, 3, 3, 1, 4, 2])
+    test.assert_eq(tokunigram.tokenize(u, "a b"), ["▁a", "▁b"])
+    test.case("a piece that is not in the scores has the impossible score")
+    test.assert(tokunigram.score_of(u, "<s>") < 0.0 - 1000000.0)
+    test.case("the added token is no piece of the model, so its text is scored as unknown")
+    test.assert_eq(tokunigram.best_score(u, "▁a<s>"), 0.0 - 1.0 - 12.0)
+
+// ── WordPiece ───────────────────────────────────────────────────────
+
+fn small_wordpiece() -> TokWordPiece
+    tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a", "##b", "b", ",", "日", "本"]), 0)
+
+@test
+fn test_wordpiece_text_is_normalised_character_by_character()
+    let n = tokpiece.bert_uncased_rules()
+    test.case("control characters are dropped and every white space is a space")
+    test.assert_eq(tokpiece.normalize(n, "a\u{1}b\u{FFFD}c\u{0}\u{AD}d"), "abcd")
+    test.assert_eq(tokpiece.normalize(n, "  a \t\n b\u{A0}\u{2003}c  "), "a b c")
+    test.assert_eq(tokpiece.normalize(n, "\n"), "")
+    test.case("Chinese characters get a space on each side")
+    test.assert_eq(tokpiece.normalize(n, "a日b"), "a 日 b")
+    test.case("a capital sigma lowercases on its own, as the reference does one character at a time")
+    test.assert_eq(tokpiece.normalize(n, "ΟΔΥΣΣΕΥΣ"), "οδυσσευσ")
+    test.assert_eq(tokpiece.normalize(n, "Ǆ ÀB"), "ǆ ab")
+    test.case("accents come off after decomposition and other marks stay with their letter's case")
+    test.assert_eq(tokpiece.normalize(n, "ÀÉÎõü ñ"), "aeiou n")
+    let none = tokpiece.no_normalization()
+    test.assert_eq(tokpiece.normalize(none, " A\u{1}\n日"), " A\u{1}\n日")
+
+@test
+fn test_wordpiece_splits_where_the_rules_say()
+    let n = tokpiece.bert_cased_rules()
+    test.assert_eq(tokpiece.split_words(n, "Hi, there! ($5)"), ["Hi", ",", "there", "!", "(", "$", "5", ")"])
+    test.assert_eq(tokpiece.split_words(n, ""), [])
+    test.assert_eq(tokpiece.split_words(n, "  "), [])
+    test.assert_eq(tokpiece.split_words(n, "a日b"), ["a", "日", "b"])
+    test.assert_eq(tokpiece.split_words(tokpiece.no_normalization(), "a, b\tc"), ["a,", "b", "c"])
+    test.assert_eq(tokpiece.split_words(tokpiece.no_normalization(), "a b "), ["a", "b"])
+
+@test
+fn test_wordpiece_pieces_decode_and_refuse()
+    let w = small_wordpiece()
+    test.assert_eq(tokpiece.tokenize(w, "ab, b"), ["a", "##b", ",", "b"])
+    test.assert_eq(tokpiece.decode(w, [1, 2, 4, 3]), Ok("ab , b"))
+    test.case("a word longer than the limit is unknown, and so is an empty one")
+    test.assert_eq(tokpiece.piece_word(tokpiece.with_max_word_len(w, 1), "ab"), ["[UNK]"])
+    test.assert_eq(tokpiece.piece_word(w, ""), ["[UNK]"])
+    test.case("a word that starts well and cannot be finished is one unknown")
+    test.assert_eq(tokpiece.piece_word(w, "az"), ["[UNK]"])
+    test.assert_eq(tokpiece.piece_word(w, "z"), ["[UNK]"])
+    test.assert_eq(tokpiece.encode(w, "z"), [0])
+    test.case("a continuation prefix alone is not a piece")
+    test.assert_eq(tokpiece.piece_word(tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "a", "##"]), 0), "ab"),
+        ["[UNK]"])
+    test.case("an id outside the vocabulary is refused")
+    match tokpiece.decode(w, [1, 77])
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "77"))
+    match tokpiece.decode(w, [0 - 1])
+        Ok(_)  => test.fail("accepted")
+        Err(_) => test.assert(true)
+    test.case("a vocabulary without the unknown token is refused")
+    match tokpiece.of_vocab_text("a\nb\n", "[UNK]")
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "[UNK]"))
+
+@test
+fn test_wordpiece_added_tokens_are_not_split()
+    let v = tokvocab.with_added(tokvocab.of_tokens(["[UNK]", "a", "[CLS]"]), [tokvocab.added("[CLS]", 2, true)])
+    let w = tokpiece.of_vocab(v, 0)
+    test.assert_eq(tokpiece.encode(w, "[CLS] a"), [2, 1])
+    let (pieces, spans) = tokpiece.pieces_with_spans(w, "[CLS] a")
+    test.assert_eq(pieces, ["[CLS]", "a"])
+    test.assert_eq(spans, [0, 5, 6, 1])
+    test.case("spans are in the original text, whatever the normaliser did")
+    let c = tokpiece.of_vocab(tokvocab.of_tokens(["[UNK]", "hello", "##s", "e", "##\u{301}"]), 0)
+    let (p2, s2) = tokpiece.pieces_with_spans(c, "  HELLOs ÉA")
+    test.assert_eq(p2, ["hello", "##s", "[UNK]"])
+    test.assert_eq(s2, [2, 5, 7, 1, 9, 3])
+
+// ── special tokens ──────────────────────────────────────────────────
+
+@test
+fn test_roles_are_recognised_by_the_names_models_use()
+    match tokspecial.of_added_tokens_json("[{\"id\": 0, \"content\": \"<unk>\"}, {\"id\": 1, \"content\": \"<s>\"}, {\"id\": 2, \"content\": \"</s>\"}, {\"id\": 3, \"content\": \"<pad>\"}, {\"id\": 4, \"content\": \"[MASK]\"}]")
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            test.assert_eq((s.unk_id, s.bos_id, s.eos_id, s.pad_id, s.sep_id, s.mask_id), (0, 1, 2, 3, 2, 4))
+    test.case("BERT's names, whose end and separator are one id")
+    match tokspecial.of_added_tokens_json("[{\"id\": 5, \"content\": \"[SEP]\"}, {\"id\": 6, \"content\": \"[CLS]\"}, {\"id\": 7, \"content\": \"[PAD]\"}, {\"id\": 8, \"content\": \"[UNK]\"}]")
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            test.assert_eq((s.unk_id, s.bos_id, s.eos_id, s.pad_id, s.sep_id, s.mask_id), (8, 6, 5, 7, 5, 0 - 1))
+    test.case("when two names fit a role the better-known one wins, whatever the order")
+    match tokspecial.of_added_tokens_json("[{\"id\": 9, \"content\": \"<|end_of_text|>\"}, {\"id\": 3, \"content\": \"<|endoftext|>\"}, {\"id\": 4, \"content\": \"<|begin_of_text|>\"}, {\"id\": 5, \"content\": \"<bos>\"}]")
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            test.assert_eq(s.eos_id, 3)
+            test.assert_eq(s.bos_id, 4)
+    test.case("the other spellings")
+    match tokspecial.of_added_tokens_json("[{\"id\": 1, \"content\": \"<|unk|>\"}, {\"id\": 2, \"content\": \"<|startoftext|>\"}, {\"id\": 3, \"content\": \"<eos>\"}, {\"id\": 4, \"content\": \"<|pad|>\"}, {\"id\": 5, \"content\": \"<sep>\"}, {\"id\": 6, \"content\": \"<mask>\"}]")
+        Err(e) => test.fail(e.message())
+        Ok(s)  => test.assert_eq((s.unk_id, s.bos_id, s.eos_id, s.pad_id, s.sep_id, s.mask_id), (1, 2, 3, 4, 5, 6))
+    test.case("a token that is none of the roles is a literal match only")
+    match tokspecial.of_added_tokens_json("[{\"id\": 1, \"content\": \"<|im_start|>\"}]")
+        Err(e) => test.fail(e.message())
+        Ok(s)  => test.assert_eq(s.eos_id, 0 - 1)
+
+@test
+fn test_added_tokens_carry_their_flags()
+    match tokspecial.added_tokens_of_json("[{\"id\": 5, \"content\": \"<a>\", \"special\": true, \"lstrip\": true}, {\"id\": 6, \"content\": \"<b>\", \"rstrip\": true}, {\"id\": 7, \"content\": \"<c>\"}]")
+        Err(e) => test.fail(e.message())
+        Ok(a)  =>
+            test.assert_eq((a[0].special, a[0].strip_spaces), (true, true))
+            test.assert_eq((a[1].special, a[1].strip_spaces), (false, true))
+            test.assert_eq((a[2].special, a[2].strip_spaces), (false, false))
+    test.case("the refusals")
+    for bad in ["x", "{}", "[1]", "[{\"id\": 1}]", "[{\"content\": \"a\"}]", "[{\"id\": -1, \"content\": \"a\"}]"]
+        match tokspecial.added_tokens_of_json(bad)
+            Ok(_)  => test.fail("accepted " + bad)
+            Err(e) => test.assert(tokfault.is_load_error(e))
+    match tokspecial.of_added_tokens_json("x")
+        Ok(_)  => test.fail("accepted")
+        Err(_) => test.assert(true)
+
+@test
+fn test_templates_leave_out_a_role_the_model_lacks()
+    let s = tokspecial.none()
+    let (pre, post) = tokspecial.template_ids(TokTemplateSingle, s)
+    test.assert_eq((pre, post), ([], []))
+    test.assert_eq(tokspecial.pair_separator_ids(s), [])
+    let (p2, q2) = tokspecial.template_ids(TokTemplatePair, tokspecial.with_eos(s, 4))
+    test.assert_eq((p2, q2), ([], [4]))
+    test.assert(tokspecial.is_special(s, 0 - 1) == false)
+    test.assert(tokspecial.is_special(s, 0) == false)
+
+// ── the model ───────────────────────────────────────────────────────
+
+fn bert_model() -> TokModel
+    let v = tokvocab.of_tokens(["[PAD]", "[UNK]", "[CLS]", "[SEP]", "hello", "world", "##s"])
+    TokWordPieceModel(tokpiece.of_vocab(v, 1))
+
+@test
+fn test_a_pair_is_wrapped_and_typed_the_way_bert_does()
+    let m = bert_model()
+    let s = tokspecial.bert_names(tokmodel.vocab_of(m))
+    let e = tokmodel.encode_pair(m, "hello", "worlds", s)
+    test.assert_eq(e.ids, [2, 4, 3, 5, 6, 3])
+    test.assert_eq(e.tokens, ["[CLS]", "hello", "[SEP]", "world", "##s", "[SEP]"])
+    test.assert_eq(e.type_ids, [0, 0, 0, 1, 1, 1])
+    test.assert_eq(e.offsets, [0, 0, 5, 0, 5, 6])
+    test.assert_eq(e.lengths, [0, 5, 0, 5, 1, 0])
+    test.assert_eq(e.attention_mask, [1, 1, 1, 1, 1, 1])
+
+@test
+fn test_padding_and_truncating_keep_the_fields_in_step()
+    let m = bert_model()
+    let s = tokspecial.bert_names(tokmodel.vocab_of(m))
+    let e = tokmodel.encode_with(m, "hello worlds", s, TokTemplateSingle)
+    test.assert_eq(e.ids, [2, 4, 5, 6, 3])
+    let p = tokmodel.padded(e, 7, s)
+    test.assert_eq(p.ids, [2, 4, 5, 6, 3, 0, 0])
+    test.assert_eq(p.attention_mask, [1, 1, 1, 1, 1, 0, 0])
+    test.assert_eq(p.lengths, [0, 5, 5, 1, 0, 0, 0])
+    test.assert_eq(list.len(p.tokens), 7)
+    test.assert_eq(list.len(p.offsets), 7)
+    test.assert_eq(list.len(p.type_ids), 7)
+    test.case("truncation drops from the end of the text and keeps the closing token")
+    let t = tokmodel.truncated(e, 4, s)
+    test.assert_eq(t.ids, [2, 4, 5, 3])
+    test.assert_eq(t.tokens, ["[CLS]", "hello", "world", "[SEP]"])
+    test.assert_eq(t.offsets, [0, 0, 6, 12])
+    test.case("a limit no larger than the closing tokens drops them too")
+    test.assert_eq(tokmodel.truncated(e, 1, s).ids, [2])
+    test.assert_eq(tokmodel.truncated(e, 0, s).ids, [])
+    test.case("an encoding already short enough is returned as it is")
+    test.assert_eq(tokmodel.truncated(e, 9, s).ids, e.ids)
+    test.assert_eq(tokmodel.token_count(m, "hello worlds"), 3)
+
+@test
+fn test_decoding_without_the_special_tokens()
+    let m = bert_model()
+    let s = tokspecial.bert_names(tokmodel.vocab_of(m))
+    test.assert_eq(tokmodel.decode(m, [2, 4, 5, 3]), Ok("[CLS] hello world [SEP]"))
+    test.assert_eq(tokmodel.decode_skipping_specials(m, [2, 4, 5, 3], s), Ok("hello world"))
+    test.case("an added token marked special is skipped too, and one that is not stays")
+    let v = tokvocab.with_added(tokvocab.of_tokens(["a", "b"]),
+        [tokvocab.added("<s>", 2, true), tokvocab.added("<t>", 3, false)])
+    let u = TokUnigramModel(tokunigram.of_pieces(v, [0.0, 0.0, 0.0], 0))
+    test.assert_eq(tokmodel.decode_skipping_specials(u, [0, 2, 3, 1], tokspecial.none()), Ok("a<t>b"))
+    test.assert_eq(tokmodel.decode(u, [0, 3]), Ok("a<t>"))
+    test.assert_eq(tokmodel.decode_one(m, 4), Ok("hello"))
+
+@test
+fn test_a_stream_holds_back_half_a_character()
+    let b = TokBpeModel(tokbpe.of_parts(tokvocab.of_tokens(tokbpe.byte_map()), [], TokPretokenGpt2))
+    let ids = tokmodel.encode(b, "a日😀").ids
+    var tail = ""
+    var out = ""
+    for id in ids
+        match tokmodel.decode_stream(b, [id], tail)
+            Ok((text, rest)) =>
+                out = out + text
+                tail = rest
+            Err(e)           => test.fail(e.message())
+    test.assert_eq(out, "a日😀")
+    test.assert_eq(tail, "")
+    test.case("a lone continuation byte is not held back, and a stray lead byte is")
+    let cont = tokvocab.id_of(tokmodel.vocab_of(b), "Ģ")
+    test.assert(cont >= 0)
+    test.case("an id the model lacks is refused")
+    match tokmodel.decode_stream(b, [9999], "")
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(str.contains(e.message(), "9999"))
+    test.assert_eq(tokmodel.decode_stream(bert_model(), [4, 5], ""), Ok(("hello world", "")))
+
+// ── tokenizer.json ──────────────────────────────────────────────────
+
+fn load_fault(text: Str) -> Str
+    match tokmodel.of_tokenizer_json(text)
+        Ok(_)  => ""
+        Err(e) => e.message()
+
+@test
+fn test_a_tokenizer_json_that_is_not_one_is_refused()
+    test.assert(str.contains(load_fault("nope"), "well-formed"))
+    test.assert(str.contains(load_fault("{}"), "'model'"))
+    test.assert(str.contains(load_fault("{\"model\": {}}"), "BPE, Unigram or WordPiece"))
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"BPE\"}}"), "'vocab'"))
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"Unigram\"}}"), "'vocab'"))
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"WordPiece\"}}"), "'vocab'"))
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"WordPiece\", \"vocab\": {\"a\": 0}}}"), "[UNK]"))
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"Unigram\", \"vocab\": [[\"a\"]]}}"), "'a'"))
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"BPE\", \"vocab\": {\"a\": 0}, \"merges\": [\"a b c\"]}, \"pre_tokenizer\": {\"type\": \"ByteLevel\"}}"),
+        "a b c"))
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"BPE\", \"vocab\": {\"a\": 0}, \"merges\": [[\"a\"]]}, \"pre_tokenizer\": {\"type\": \"ByteLevel\"}}"),
+        "merges line 1"))
+    test.case("added tokens that are not well formed are refused")
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"BPE\"}, \"added_tokens\": [1]}"), "added token"))
+
+fn bpe_json(pre: Str, extra: Str) -> Str
+    "{\"model\": {\"type\": \"BPE\", \"vocab\": {\"a\": 0, \"b\": 1, \"ab\": 2}, \"merges\": [[\"a\", \"b\"]]}, \"pre_tokenizer\": " + pre + extra + "}"
+
+fn rule_of_json(pre: Str) -> Str
+    match tokmodel.of_tokenizer_json(bpe_json(pre, ""))
+        Err(e)             => e.message()
+        Ok(TokBpeModel(b)) =>
+            match b.pretokenizer
+                TokPretokenGpt2       => "gpt2"
+                TokPretokenLlama3     => "llama3"
+                TokPretokenQwen2      => "qwen2"
+                TokPretokenWhitespace => "whitespace"
+                TokPretokenNone       => "none"
+        Ok(_)              => "other"
+
+@test
+fn test_the_pretokenizer_of_a_tokenizer_json_is_found_from_its_pattern()
+    let gpt2 = "{\"type\": \"Split\", \"pattern\": {\"Regex\": \"'s|'t|'re|'ve|'m|'ll|'d| ?\\\\p{L}+| ?\\\\p{N}+\"}}"
+    let llama = "{\"type\": \"Split\", \"pattern\": {\"Regex\": \"(?i:'s|'t)|\\\\p{N}{1,3}\"}}"
+    let qwen = "{\"type\": \"Split\", \"pattern\": {\"Regex\": \"(?i:'s|'t)|\\\\p{N}| ?x\"}}"
+    let level = "{\"type\": \"ByteLevel\", \"add_prefix_space\": false, \"use_regex\": false}"
+    test.assert_eq(rule_of_json("{\"type\": \"ByteLevel\"}"), "gpt2")
+    test.assert_eq(rule_of_json("{\"type\": \"Sequence\", \"pretokenizers\": [" + gpt2 + ", " + level + "]}"),
+        "gpt2")
+    test.assert_eq(rule_of_json("{\"type\": \"Sequence\", \"pretokenizers\": [" + llama + ", " + level + "]}"),
+        "llama3")
+    test.assert_eq(rule_of_json("{\"type\": \"Sequence\", \"pretokenizers\": [" + qwen + ", " + level + "]}"),
+        "qwen2")
+    test.case("a String pattern has no regular expression to recognise")
+    test.assert(str.contains(rule_of_json("{\"type\": \"Split\", \"pattern\": {\"String\": \" \"}}"), "pattern"))
+    test.assert(str.contains(rule_of_json("{\"type\": \"Split\", \"pattern\": {}}"), "pattern"))
+    test.case("a regular expression this package does not implement is named")
+    test.assert(str.contains(rule_of_json("{\"type\": \"Split\", \"pattern\": {\"Regex\": \"\\\\w+\"}}"), "\\w+"))
+    test.case("a pre-tokenizer with no byte-level step is not byte-level BPE")
+    test.assert(str.contains(rule_of_json("{\"type\": \"Metaspace\"}"), "byte-level"))
+    test.assert(str.contains(rule_of_json("{\"type\": \"ByteLevel\", \"use_regex\": false}"), "byte-level"))
+    test.assert(str.contains(rule_of_json("3"), "byte-level"))
+    test.case("the prefix space of the byte-level step is kept")
+    match tokmodel.of_tokenizer_json(bpe_json("{\"type\": \"ByteLevel\", \"add_prefix_space\": true}", ""))
+        Ok(TokBpeModel(b)) => test.assert(b.add_prefix_space)
+        _                  => test.fail("not BPE")
+    test.case("a tokenizer.json with no pre_tokenizer member is refused too")
+    test.assert(str.contains(load_fault("{\"model\": {\"type\": \"BPE\", \"vocab\": {\"a\": 0}, \"merges\": []}}"),
+        "byte-level"))
+
+@test
+fn test_a_merge_may_be_a_string_or_a_pair_and_added_tokens_come_along()
+    let text = "{\"model\": {\"type\": \"BPE\", \"vocab\": {\"a\": 0, \"b\": 1, \"ab\": 2, \"abb\": 3}, \"merges\": [\"a b\", [\"ab\", \"b\"]]}, \"pre_tokenizer\": {\"type\": \"ByteLevel\"}, \"added_tokens\": [{\"id\": 4, \"content\": \"<e>\", \"special\": true}]}"
+    match tokmodel.of_tokenizer_json(text)
+        Err(e) => test.fail(e.message())
+        Ok(m)  =>
+            test.assert_eq(tokmodel.encode(m, "abb<e>").ids, [3, 4])
+            test.assert_eq(tokmodel.vocab_size(m), 5)
+            test.assert_eq(tokmodel.decode(m, [3, 4]), Ok("abb<e>"))
+            test.assert_eq(tokmodel.tokenize(m, "ab"), ["ab"])
+    match tokmodel.specials_of_tokenizer_json(text)
+        Err(e) => test.fail(e.message())
+        Ok(s)  => test.assert_eq(s.eos_id, 0 - 1)
+    match tokmodel.specials_of_tokenizer_json("[")
+        Ok(_)  => test.fail("accepted")
+        Err(e) => test.assert(tokfault.is_load_error(e))
+
+fn unigram_json(pre: Str, model_extra: Str) -> Str
+    "{\"model\": {\"type\": \"Unigram\", \"unk_id\": 0" + model_extra + ", \"vocab\": [[\"<unk>\", 0.0], [\"▁a\", -1.0], [\"a\", -2.0], [\"▁\", -3.0]]}" + pre + ", \"added_tokens\": [{\"id\": 0, \"content\": \"<unk>\", \"special\": true}]}"
+
+@test
+fn test_a_unigram_tokenizer_json_reads_its_options()
+    match tokmodel.of_tokenizer_json(unigram_json("", ""))
+        Err(e) => test.fail(e.message())
+        Ok(m)  =>
+            test.assert_eq(tokmodel.model_name(m), "Unigram")
+            test.assert_eq(tokmodel.encode(m, "a").ids, [1])
+            test.assert(tokmodel.is_lossless(m) == false)
+            test.assert_eq(tokmodel.encode(m, "a").tokens, ["▁a"])
+            test.assert_eq(tokmodel.encode(m, "a").offsets, [0])
+    test.case("byte fallback makes the model lossless")
+    match tokmodel.of_tokenizer_json(unigram_json("", ", \"byte_fallback\": true"))
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert(tokmodel.is_lossless(m))
+    test.case("a Metaspace step that does not prepend turns the dummy prefix off")
+    match tokmodel.of_tokenizer_json(unigram_json(", \"pre_tokenizer\": {\"type\": \"Metaspace\", \"prepend_scheme\": \"never\"}", ""))
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(tokmodel.encode(m, "a").ids, [2])
+    match tokmodel.of_tokenizer_json(unigram_json(", \"pre_tokenizer\": {\"type\": \"Metaspace\", \"add_prefix_space\": false}", ""))
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(tokmodel.encode(m, "a").ids, [2])
+    match tokmodel.of_tokenizer_json(unigram_json(", \"pre_tokenizer\": {\"type\": \"Metaspace\", \"prepend_scheme\": \"always\"}", ""))
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(tokmodel.encode(m, "a").ids, [1])
+    test.case("the unknown id defaults to zero")
+    match tokmodel.of_tokenizer_json("{\"model\": {\"type\": \"Unigram\", \"vocab\": [[\"<unk>\", 0.0], [\"a\", -1.0]]}}")
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(tokmodel.encode(m, "z").ids, [0])
+
+@test
+fn test_a_wordpiece_tokenizer_json_reads_its_options()
+    let text = "{\"normalizer\": {\"type\": \"BertNormalizer\", \"lowercase\": false, \"strip_accents\": true, \"handle_chinese_chars\": false, \"clean_text\": false}, \"pre_tokenizer\": {\"type\": \"BertPreTokenizer\"}, \"model\": {\"type\": \"WordPiece\", \"unk_token\": \"<u>\", \"continuing_subword_prefix\": \"@@\", \"max_input_chars_per_word\": 3, \"vocab\": {\"<u>\": 0, \"A\": 1, \"@@b\": 2, \"e\": 3}}}"
+    match tokmodel.of_tokenizer_json(text)
+        Err(e)                   => test.fail(e.message())
+        Ok(TokWordPieceModel(w)) =>
+            test.assert_eq((w.continuation, w.max_word_len, w.unk_id), ("@@", 3, 0))
+            test.assert_eq((w.normalizer.lowercase, w.normalizer.strip_accents), (false, true))
+            test.assert_eq((w.normalizer.split_cjk, w.normalizer.clean_whitespace, w.normalizer.split_punctuation),
+                (false, false, true))
+            test.assert_eq(tokpiece.encode(w, "Ab é"), [1, 2, 3])
+        Ok(_)                    => test.fail("not WordPiece")
+    test.case("with no normalizer or pre-tokenizer the text is split on white space only")
+    match tokmodel.of_tokenizer_json("{\"model\": {\"type\": \"WordPiece\", \"vocab\": {\"[UNK]\": 0, \"a\": 1}}}")
+        Err(e)                   => test.fail(e.message())
+        Ok(TokWordPieceModel(w)) => test.assert(w.normalizer.lowercase == false and w.normalizer.split_punctuation == false)
+        Ok(_)                    => test.fail("not WordPiece")
+
+@test
+fn test_every_message_names_what_it_found()
+    test.assert(str.contains(TokMalformedJson(7, "an object").message(), "byte 7"))
+    test.assert(str.contains(TokIdOutOfRange(9, 8).message(), "different models"))
+    test.assert(str.contains(TokUnknownModel("Foo").message(), "'Foo'"))
+    test.assert(tokfault.is_load_error(TokBadByteMap("x")))
+    test.assert(tokfault.is_load_error(TokMissingScore("x")))
+    test.assert(tokfault.is_load_error(TokUnknownModel("x")))
+
+@test
+fn test_the_last_corners()
+    test.case("a quote at the end of the text is no contraction")
+    test.assert_eq(tokbpe.pretokenize(TokPretokenGpt2, "'"), ["'"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenGpt2, "'r"), ["'", "r"])
+    test.assert_eq(tokbpe.pretokenize(TokPretokenLlama3, "'R"), ["'R"])
+    test.case("an added token longer than the text that is left does not match")
+    let v = tokvocab.with_added(tokvocab.of_tokens(["a"]), [tokvocab.added("<s>", 9, true)])
+    test.assert_eq(tokvocab.match_added(v, "<s", 0), ("", 0 - 1))
+    test.assert_eq(tokvocab.match_added(v, "x<s>", 1), ("<s>", 9))
+    test.assert_eq(tokvocab.match_added(v, "x<s>", 9), ("", 0 - 1))
+    test.case("private-use and unassigned code points are dropped by the cleaning rule, and a byte that is not UTF-8 is kept")
+    let n = tokpiece.bert_cased_rules()
+    test.assert_eq(tokpiece.normalize(n, "a\u{E000}b\u{378}c" + str.from_byte(255) + "d"),
+        "abc" + str.from_byte(255) + "d")
+    test.case("a vocabulary with more pieces than scores gives the extra ones the impossible score")
+    let u = tokunigram.of_pieces(tokvocab.of_tokens(["<unk>", "a", "b"]), [0.0, 0.0 - 1.0], 0)
+    test.assert_eq(tokunigram.best_path(u, "ab"), ["a", "b"])
+    test.assert(tokunigram.best_score(u, "ab") < 0.0 - 1000000.0)

@@ -1,15 +1,13 @@
 [package]
 name        = "tokenizers-nv"
-version     = "0.0.3"
+version     = "0.1.0"
 description = "The tokenizer family behind one enum: byte-level BPE as GPT-2 does it, SentencePiece unigram, and WordPiece, with encode to ids, decode from ids, special-token handling, and a vocabulary loaded from a value the caller holds rather than from a file."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+# `experimental` because no program outside this repository has used the
+# package yet, and the tests were written against the signatures rather
+# than by a consumer.
+stability   = "experimental"
 
 # `core`, and for a tokenizer that is a real constraint rather than an
 # easy one: the reference implementations all open files.  A vocabulary
@@ -34,8 +32,10 @@ novo        = ">= 0.8.9"
 "README.md" = "BPE, SentencePiece and WordPiece behind one enum"
 
 [dependencies]
-# None, and the reason is worth stating: a tokenizer is byte arithmetic
-# and a table lookup.  The reference implementation reaches for a regex
-# engine for its pre-tokenizer patterns; this package writes those
-# patterns out as named rules instead — see `tokbpe`'s header — which
-# keeps the dependency list empty and the behaviour inspectable.
+# unicode-nv, for the three places a tokenizer needs the Unicode
+# database: the letter and number classes the pre-tokenizer patterns are
+# written over (`\p{L}`, `\p{N}`), the canonical decomposition that
+# strips accents, and the lowercase mapping.  The pre-tokenizer patterns
+# themselves are written out as named rules rather than handed to a
+# regex engine; see `tokbpe`'s header.
+unicode-nv = "^0.1.4"

@@ -45,6 +45,9 @@
 
 use tokvocab
 use tokfault
+use tokutf8
+use std.str
+use std.list
 
 // One merge rule: two pieces that join, and how early.
 //
@@ -85,16 +88,17 @@ pub enum TokPretokenRule
     // non-space; then any remaining whitespace.  The optional leading
     // space is why GPT-2 tokens so often begin with one.
     TokPretokenGpt2
-    // Llama 3's, which is GPT-2's with two changes that matter: the
-    // contractions are matched case-insensitively, and a digit run is
-    // capped at THREE digits — so `1234` is two tokens rather than one
-    // and every number tokenises consistently regardless of length.
+    // Llama 3's, the cl100k pattern.  The contractions match without regard
+    // to case.  A word may follow one character that is not a letter, a
+    // number or a line break.  A digit run is capped at three digits, so
+    // `1234` is two tokens.  Symbols take any line breaks that follow them,
+    // and white space that ends in a line break is one piece.
     TokPretokenLlama3
-    // Qwen2's, in the cl100k family: case-insensitive contractions, and
-    // a digit run of exactly ONE digit.
+    // Qwen2's: Llama 3's pattern with a digit run of exactly one digit.
     TokPretokenQwen2
-    // Split on whitespace only, keeping it with the following word.
-    // The simple rule some older BPE models use.
+    // Split on white space only, keeping one space with the word after it.
+    // Any other white space is a piece of its own.  The simple rule some
+    // older BPE models use.
     TokPretokenWhitespace
     // No splitting: merge over the whole input at once.  Correct only
     // for a model trained that way, and slow on long text — BPE is
@@ -141,14 +145,16 @@ pub struct TokBpe
 //     println("${tokbpe.merge_count(tokbpe.of_parts(v, [], TokPretokenGpt2))}")
 // ```
 pub fn of_parts(vocab: TokVocab, merges: [TokMerge], rule: TokPretokenRule) -> TokBpe
-    todo("tokenizers-nv.tokbpe.of_parts")
+    TokBpe { vocab: vocab, merges: list.clone(merges), sorted: sorted_merges(merges),
+             pretokenizer: rule, add_prefix_space: false }
 
 // A BPE tokenizer from a `vocab.json`'s text and a `merges.txt`'s text.
 //
 // GPT-2's two-file format, as the two strings a caller holds.  The
 // first line of a merges file is a `#version:` comment and is skipped;
 // every other line is two pieces separated by a space, and its position
-// is its rank.
+// is its rank.  The line number in a `TokMalformedMerge` counts from one
+// over the whole file.
 //
 // ```novo
 // use tokbpe
@@ -160,7 +166,23 @@ pub fn of_parts(vocab: TokVocab, merges: [TokMerge], rule: TokPretokenRule) -> T
 // ```
 pub fn of_gpt2_files(vocab_json: Str, merges_txt: Str,
                      rule: TokPretokenRule) -> Result<TokBpe, TokFault>
-    todo("tokenizers-nv.tokbpe.of_gpt2_files")
+    let vocab = tokvocab.of_json_object(vocab_json)!
+    var merges: [TokMerge] = []
+    let lines = str.split(merges_txt, "\n")
+    let count = list.len(lines)
+    for i in 0..count
+        var line = lines[i]
+        if str.ends_with(line, "\r")
+            line = str.slice(line, 0, str.len(line) - 1)
+        if i == 0 and str.starts_with(line, "#version")
+            continue
+        if i == count - 1 and str.is_empty(line)
+            continue
+        let parts = str.split(line, " ")
+        if list.len(parts) != 2 or str.is_empty(parts[0]) or str.is_empty(parts[1])
+            return Err(TokMalformedMerge(i + 1, line))
+        list.push(merges, merge(parts[0], parts[1], list.len(merges)))
+    Ok(of_parts(vocab, merges, rule))
 
 // A merge rule.
 //
@@ -171,7 +193,7 @@ pub fn of_gpt2_files(vocab_json: Str, merges_txt: Str,
 //     println("${tokbpe.merge("Ġt", "he", 0).rank}")
 // ```
 pub fn merge(left: Str, right: Str, rank: Int) -> TokMerge
-    todo("tokenizers-nv.tokbpe.merge")
+    TokMerge { left: left, right: right, rank: rank }
 
 // The same tokenizer with a leading space added before encoding.
 //
@@ -184,7 +206,8 @@ pub fn merge(left: Str, right: Str, rank: Int) -> TokMerge
 //     println("${tokbpe.with_prefix_space(b, true).add_prefix_space}")
 // ```
 pub fn with_prefix_space(b: TokBpe, add: Bool) -> TokBpe
-    todo("tokenizers-nv.tokbpe.with_prefix_space")
+    TokBpe { vocab: b.vocab, merges: b.merges, sorted: b.sorted,
+             pretokenizer: b.pretokenizer, add_prefix_space: add }
 
 // How many merges the table holds.
 //
@@ -196,7 +219,7 @@ pub fn with_prefix_space(b: TokBpe, add: Bool) -> TokBpe
 //     println("${tokbpe.merge_count(tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2))}")
 // ```
 pub fn merge_count(b: TokBpe) -> Int
-    todo("tokenizers-nv.tokbpe.merge_count")
+    list.len(b.merges)
 
 // The rank of the pair `left` `right`, or -1 when it is not a merge.
 //
@@ -212,7 +235,10 @@ pub fn merge_count(b: TokBpe) -> Int
 //     println("${tokbpe.rank_of(b, "Ġt", "he")}")
 // ```
 pub fn rank_of(b: TokBpe, left: Str, right: Str) -> Int
-    todo("tokenizers-nv.tokbpe.rank_of")
+    let at = find_merge(b, left, right)
+    if at < 0
+        return 0 - 1
+    b.merges[at].rank
 
 // The 256 byte values as the code points GPT-2 writes them as.
 //
@@ -232,7 +258,10 @@ pub fn rank_of(b: TokBpe, left: Str, right: Str) -> Int
 //     println("${list.len(tokbpe.byte_map())}")
 // ```
 pub fn byte_map() -> [Str]
-    todo("tokenizers-nv.tokbpe.byte_map")
+    var out: [Str] = []
+    for b in 0..256
+        list.push(out, tokutf8.encode(mapped_code(b)))
+    out
 
 // A byte string as the code points a BPE vocabulary is written in.
 //
@@ -246,7 +275,12 @@ pub fn byte_map() -> [Str]
 //     println(tokbpe.bytes_to_alphabet(" the"))
 // ```
 pub fn bytes_to_alphabet(raw: Str) -> Str
-    todo("tokenizers-nv.tokbpe.bytes_to_alphabet")
+    let sb = str.builder_new()
+    for i in 0..str.len(raw)
+        str.builder_append(sb, tokutf8.encode(mapped_code(str.byte_at_or(raw, i, 0))))
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
 
 // A string in the vocabulary's alphabet back to raw bytes.
 //
@@ -265,7 +299,15 @@ pub fn bytes_to_alphabet(raw: Str) -> Str
 //         Err(_) => println("refused")
 // ```
 pub fn alphabet_to_bytes(mapped: Str) -> Result<Str, TokFault>
-    todo("tokenizers-nv.tokbpe.alphabet_to_bytes")
+    let sb = str.builder_new()
+    let failure = append_raw(sb, mapped)
+    var out = ""
+    if failure == ""
+        out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    if failure != ""
+        return Err(TokBadByteMap(failure))
+    Ok(out)
 
 // The pieces a rule splits text into, before any merging.
 //
@@ -282,7 +324,11 @@ pub fn alphabet_to_bytes(mapped: Str) -> Result<Str, TokFault>
 //     println("${list.len(tokbpe.pretokenize(TokPretokenGpt2, "hello world"))}")
 // ```
 pub fn pretokenize(rule: TokPretokenRule, text: Str) -> [Str]
-    todo("tokenizers-nv.tokbpe.pretokenize")
+    var out: [Str] = []
+    let spans = pretokenize_spans(rule, text)
+    for k in 0..list.len(spans) / 2
+        list.push(out, str.slice(text, spans[2 * k], spans[2 * k + 1]))
+    out
 
 // One pre-token merged into its final pieces.
 //
@@ -300,7 +346,34 @@ pub fn pretokenize(rule: TokPretokenRule, text: Str) -> [Str]
 //     println("${list.len(tokbpe.merge_word(b, "hello"))}")
 // ```
 pub fn merge_word(b: TokBpe, word: Str) -> [Str]
-    todo("tokenizers-nv.tokbpe.merge_word")
+    var parts = str.chars(word)
+    while list.len(parts) > 1
+        // The lowest-ranked adjacent pair, leftmost on a tie.
+        var best = 0 - 1
+        var best_pair = 0 - 1
+        for k in 0..list.len(parts) - 1
+            let r = rank_of(b, parts[k], parts[k + 1])
+            if r >= 0 and (best < 0 or r < best)
+                best = r
+                best_pair = k
+        if best < 0
+            break
+        // Join every non-overlapping occurrence of that pair in one pass.
+        let left = parts[best_pair]
+        let right = parts[best_pair + 1]
+        var next: [Str] = []
+        var joined = false
+        for k in 0..list.len(parts)
+            if joined
+                joined = false
+                continue
+            if k + 1 < list.len(parts) and parts[k] == left and parts[k + 1] == right
+                list.push(next, left + right)
+                joined = true
+            else
+                list.push(next, parts[k])
+        parts = next
+    parts
 
 // Text as token ids.
 //
@@ -318,7 +391,11 @@ pub fn merge_word(b: TokBpe, word: Str) -> [Str]
 //     println("${list.len(tokbpe.encode(b, "hello"))}")
 // ```
 pub fn encode(b: TokBpe, text: Str) -> [Int]
-    todo("tokenizers-nv.tokbpe.encode")
+    let (pieces, _) = pieces_with_spans(b, text)
+    var ids: [Int] = []
+    for p in pieces
+        list.push(ids, tokvocab.id_of(b.vocab, p))
+    ids
 
 // Text as token strings, in the vocabulary's alphabet.
 //
@@ -336,7 +413,8 @@ pub fn encode(b: TokBpe, text: Str) -> [Int]
 //     println("${list.len(tokbpe.tokenize(b, "hello"))}")
 // ```
 pub fn tokenize(b: TokBpe, text: Str) -> [Str]
-    todo("tokenizers-nv.tokbpe.tokenize")
+    let (pieces, _) = pieces_with_spans(b, text)
+    pieces
 
 // Token ids back to text.
 //
@@ -355,4 +433,345 @@ pub fn tokenize(b: TokBpe, text: Str) -> [Str]
 //         Err(_) => println("refused")
 // ```
 pub fn decode(b: TokBpe, ids: [Int]) -> Result<Str, TokFault>
-    todo("tokenizers-nv.tokbpe.decode")
+    let sb = str.builder_new()
+    var failure: ?TokFault = None
+    for id in ids
+        failure = append_id(b, sb, id)
+        if failure != None
+            break
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    match failure
+        Some(f) => Err(f)
+        None    => Ok(out)
+
+// The byte spans a rule splits text into, as a flat list of `start, end`
+// pairs.
+//
+// The offsets are into `text`, which is what an encoding reports.
+//
+// ```novo
+// use tokbpe
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(tokbpe.pretokenize_spans(TokPretokenGpt2, "hello world"))}")
+// ```
+pub fn pretokenize_spans(rule: TokPretokenRule, text: Str) -> [Int]
+    let cps = tokutf8.codes(text)
+    let starts = tokutf8.starts(text)
+    let n = list.len(cps)
+    var out: [Int] = []
+    var resume = 0
+    for i in 0..n
+        if i < resume
+            continue
+        let e = match rule
+            TokPretokenGpt2       => end_gpt2(cps, i)
+            TokPretokenLlama3     => end_cl100k(cps, i, 3)
+            TokPretokenQwen2      => end_cl100k(cps, i, 1)
+            TokPretokenWhitespace => end_whitespace(cps, i)
+            TokPretokenNone       => n
+        list.push(out, starts[i])
+        list.push(out, starts[e])
+        resume = e
+    out
+
+// The pieces `tokenize` answers, and where each one sits in `text`.
+//
+// The second list holds `start, length` pairs in bytes of the original
+// text, one pair per piece.  An added token is one piece and covers its
+// own text.  When `add_prefix_space` is on, the space that was added is
+// not part of any span.
+//
+// ```novo
+// use tokbpe
+// use tokvocab
+// use std.list
+//
+// fn main() [io]
+//     let b = tokbpe.of_parts(tokvocab.of_tokens(["a"]), [], TokPretokenGpt2)
+//     let (pieces, spans) = tokbpe.pieces_with_spans(b, "a")
+//     println("${list.len(pieces)} ${list.len(spans)}")
+// ```
+pub fn pieces_with_spans(b: TokBpe, text: Str) -> ([Str], [Int])
+    var pieces: [Str] = []
+    var spans: [Int] = []
+    let cuts = tokvocab.split_on_added(b.vocab, text)
+    for t in 0..list.len(cuts) / 3
+        let lo = cuts[3 * t]
+        let hi = cuts[3 * t + 1]
+        if cuts[3 * t + 2] >= 0
+            list.push(pieces, str.slice(text, lo, hi))
+            list.push(spans, lo)
+            list.push(spans, hi - lo)
+        else
+            add_stretch(b, str.slice(text, lo, hi), lo, var pieces, var spans)
+    (pieces, spans)
+
+// The code point GPT-2 writes a byte as.  The 188 bytes that are printable
+// ASCII or printable Latin-1 stand for themselves; the other 68 take the
+// code points from 256 upward in byte order.
+fn mapped_code(b: Int) -> Int
+    if b <= 32
+        return 256 + b
+    if b <= 126
+        return b
+    if b <= 160
+        return 256 + 33 + (b - 127)
+    if b <= 172
+        return b
+    if b == 173
+        return 256 + 67
+    b
+
+// The byte a code point of the alphabet stands for, or -1.
+fn unmapped_byte(cp: Int) -> Int
+    if cp >= 33 and cp <= 126
+        return cp
+    if cp >= 161 and cp <= 255 and cp != 173
+        return cp
+    if cp >= 256 and cp <= 288
+        return cp - 256
+    if cp >= 289 and cp <= 322
+        return 127 + (cp - 289)
+    if cp == 323
+        return 173
+    0 - 1
+
+// Appends the bytes the alphabet string stands for to the builder.  The
+// answer is empty on success and the reason otherwise.
+fn append_raw(sb: Int, mapped: Str) -> Str
+    var at = 0
+    let total = str.len(mapped)
+    while at < total
+        let cp = tokutf8.code_at(mapped, at)
+        let byte = unmapped_byte(cp)
+        if byte < 0
+            return "the code point U+${hex_of(cp)} stands for no byte"
+        str.builder_append_char(sb, byte)
+        at = at + tokutf8.length_at(mapped, at)
+    ""
+
+fn hex_of(n: Int) -> Str
+    let digits = "0123456789ABCDEF"
+    var out = ""
+    var v = n
+    while v > 0 or str.len(out) < 4
+        out = str.slice(digits, v & 15, (v & 15) + 1) + out
+        v = v >> 4
+    out
+
+// Appends the text of one id to the builder, or answers why it cannot.
+fn append_id(b: TokBpe, sb: Int, id: Int) -> ?TokFault
+    for a in b.vocab.added
+        if a.id == id
+            str.builder_append(sb, a.content)
+            return None
+    if id < 0 or id >= list.len(b.vocab.tokens)
+        return Some(TokIdOutOfRange(id, tokvocab.size(b.vocab)))
+    let failure = append_raw(sb, b.vocab.tokens[id])
+    if failure != ""
+        return Some(TokBadByteMap(failure))
+    None
+
+// The merge-table positions ordered by (left, right).  Equal pairs are in
+// no particular order.
+fn sorted_merges(merges: [TokMerge]) -> [Int]
+    var keys: [Str] = []
+    var idx: [Int] = []
+    for i in 0..list.len(merges)
+        list.push(keys, pair_key(merges[i].left, merges[i].right))
+        list.push(idx, i)
+    list.sort_by(idx, i => keys[i])
+    idx
+
+// One string that orders as the pair does: the two parts around a NUL byte.
+// workaround(sort-by-tuple-key-of-list-elements-unsorted): a tuple key of
+// two strings does not sort.
+fn pair_key(left: Str, right: Str) -> Str
+    left + str.from_byte(0) + right
+
+// The position in `merges` of the best-ranked entry for a pair, or -1.
+fn find_merge(b: TokBpe, left: Str, right: Str) -> Int
+    var lo = 0
+    var hi = list.len(b.sorted)
+    while lo < hi
+        let mid = (lo + hi) / 2
+        let m = b.merges[b.sorted[mid]]
+        if pair_key(m.left, m.right) < pair_key(left, right)
+            lo = mid + 1
+        else
+            hi = mid
+    var best = 0 - 1
+    var at = lo
+    while at < list.len(b.sorted)
+        let m = b.merges[b.sorted[at]]
+        if m.left != left or m.right != right
+            break
+        if best < 0 or m.rank < b.merges[best].rank
+            best = b.sorted[at]
+        at = at + 1
+    best
+
+// Tokenises the text between added tokens and appends the pieces and their
+// byte spans, `start, length`, to the two lists.  `base` is the offset of
+// the stretch in the whole text.
+fn add_stretch(b: TokBpe, stretch: Str, base: Int, var pieces: [Str], var spans: [Int])
+    var text = stretch
+    var shift = 0
+    if b.add_prefix_space and not str.starts_with(stretch, " ")
+        text = " " + stretch
+        shift = 1
+    let cuts = pretokenize_spans(b.pretokenizer, text)
+    for k in 0..list.len(cuts) / 2
+        let word = str.slice(text, cuts[2 * k], cuts[2 * k + 1])
+        var pos = cuts[2 * k]
+        for piece in merge_word(b, bytes_to_alphabet(word))
+            let width = list.len(str.chars(piece))
+            if tokvocab.id_of(b.vocab, piece) >= 0
+                push_span(piece, base, pos - shift, width, var pieces, var spans)
+                pos = pos + width
+            else
+                // A piece the vocabulary lacks falls back to its single
+                // characters, and a character it lacks is dropped.
+                for ch in str.chars(piece)
+                    if tokvocab.id_of(b.vocab, ch) >= 0
+                        push_span(ch, base, pos - shift, 1, var pieces, var spans)
+                    pos = pos + 1
+
+fn push_span(piece: Str, base: Int, pos: Int, width: Int, var pieces: [Str], var spans: [Int])
+    var start = pos
+    var len = width
+    if start < 0
+        len = len + start
+        start = 0
+    list.push(pieces, piece)
+    list.push(spans, base + start)
+    list.push(spans, len)
+
+// The end of the pre-token that GPT-2's pattern matches at `i`, as an
+// index into the code points.
+fn end_gpt2(cps: [Int], i: Int) -> Int
+    let c = contraction_end(cps, i, false)
+    if c >= 0
+        return c
+    let l = spaced_run(cps, i, 0)
+    if l >= 0
+        return l
+    let d = spaced_run(cps, i, 1)
+    if d >= 0
+        return d
+    let o = spaced_run(cps, i, 2)
+    if o >= 0
+        return o
+    space_end(cps, i)
+
+// The end of the pre-token that the cl100k-style pattern matches at `i`,
+// with digit runs capped at `digits`.  Llama 3 uses three and Qwen2 one.
+fn end_cl100k(cps: [Int], i: Int, digits: Int) -> Int
+    let n = list.len(cps)
+    let c = contraction_end(cps, i, true)
+    if c >= 0
+        return c
+    // One optional character that is not a line break, a letter or a
+    // number, then letters.
+    var j = i
+    let first = cps[i]
+    if not tokutf8.is_letter(first) and not tokutf8.is_number(first) and first != 10 and first != 13
+        j = i + 1
+    let letters = run_end(cps, j, 0)
+    if letters > j
+        return letters
+    if tokutf8.is_number(first)
+        var e = i
+        while e < n and e - i < digits and tokutf8.is_number(cps[e])
+            e = e + 1
+        return e
+    // An optional space, symbols, then any line breaks.
+    let o = spaced_run(cps, i, 2)
+    if o >= 0
+        var e = o
+        while e < n and (cps[e] == 10 or cps[e] == 13)
+            e = e + 1
+        return e
+    // Whitespace that ends in a line break.
+    if tokutf8.is_space(first)
+        let stop = run_end(cps, i, 3)
+        var k = stop - 1
+        while k >= i
+            if cps[k] == 10 or cps[k] == 13
+                return k + 1
+            k = k - 1
+    space_end(cps, i)
+
+// The end of the pre-token that splits on whitespace only, keeping one
+// space with the word that follows it.
+fn end_whitespace(cps: [Int], i: Int) -> Int
+    let n = list.len(cps)
+    if not tokutf8.is_space(cps[i])
+        return run_end(cps, i, 4)
+    if i + 1 < n and not tokutf8.is_space(cps[i + 1])
+        return run_end(cps, i + 1, 4)
+    space_end(cps, i)
+
+// The end of a run of whitespace at `i` that leaves its last character for
+// the word that follows it, as `\s+(?!\S)` does, falling back to the whole
+// run when only one character is left.
+fn space_end(cps: [Int], i: Int) -> Int
+    let n = list.len(cps)
+    let stop = run_end(cps, i, 3)
+    if stop >= n or stop - 1 <= i
+        return stop
+    stop - 1
+
+// The end of the run of code points of one kind starting at `j`: 0 letters,
+// 1 numbers, 2 anything that is not a space, letter or number, 3 spaces,
+// 4 anything that is not a space.
+fn run_end(cps: [Int], j: Int, kind: Int) -> Int
+    let n = list.len(cps)
+    var e = j
+    while e < n and in_kind(cps[e], kind)
+        e = e + 1
+    e
+
+fn in_kind(cp: Int, kind: Int) -> Bool
+    if kind == 0
+        return tokutf8.is_letter(cp)
+    if kind == 1
+        return tokutf8.is_number(cp)
+    if kind == 3
+        return tokutf8.is_space(cp)
+    if kind == 4
+        return not tokutf8.is_space(cp)
+    not tokutf8.is_space(cp) and not tokutf8.is_letter(cp) and not tokutf8.is_number(cp)
+
+// ` ?` followed by a run of one kind: the end, or -1 when there is none.
+fn spaced_run(cps: [Int], i: Int, kind: Int) -> Int
+    var j = i
+    if cps[i] == 32
+        j = i + 1
+    let e = run_end(cps, j, kind)
+    if e > j
+        return e
+    0 - 1
+
+// The end of a contraction (`'s 't 're 've 'm 'll 'd`) at `i`, or -1.
+fn contraction_end(cps: [Int], i: Int, any_case: Bool) -> Int
+    if cps[i] != 39
+        return 0 - 1
+    let a = lowered(cps, i + 1, any_case)
+    if a == 115 or a == 116 or a == 109 or a == 100
+        return i + 2
+    let c = lowered(cps, i + 2, any_case)
+    if a == 114 and c == 101 or a == 118 and c == 101 or a == 108 and c == 108
+        return i + 3
+    0 - 1
+
+fn lowered(cps: [Int], j: Int, any_case: Bool) -> Int
+    if j >= list.len(cps)
+        return 0 - 1
+    let c = cps[j]
+    if any_case and c >= 65 and c <= 90
+        return c + 32
+    c
