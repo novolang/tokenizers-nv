@@ -587,8 +587,7 @@ fn sorted_merges(merges: [TokMerge]) -> [Int]
     idx
 
 // One string that orders as the pair does: the two parts around a NUL byte.
-// workaround(sort-by-tuple-key-of-list-elements-unsorted): a tuple key of
-// two strings does not sort.
+// One flat key stands for the pair, so a released compiler sorts it as a string.
 fn pair_key(left: Str, right: Str) -> Str
     left + str.from_byte(0) + right
 

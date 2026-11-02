@@ -706,8 +706,8 @@ fn walk_pre(p: JsonValueH) -> [Str]
         return out
     if kind == "Split"
         if let Some(pattern) = json.get(p, "pattern")
-            // workaround(nested-default-chain-in-a-concatenation-leaks-a-string): the
-            // chain is bound to a name before it is joined to the prefix.
+            // The chain is bound to a name before it is joined to the prefix,
+            // so a released compiler does not leak the string.
             let found = json.get_str(pattern, "Regex") ?? (json.get_str(pattern, "String") ?? "")
             list.push(out, "Split:" + found)
         return out
