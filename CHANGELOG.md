@@ -5,6 +5,10 @@ All notable changes to tokenizers-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.1 — 2026-11-03
+
+This release requires novo 0.23.0 or later.
+
 ## 0.1.0 — 2026-10-29
 
 The first release with bodies, and `stability = "experimental"`.  Every function in the interface now does what its comment says.

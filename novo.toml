@@ -1,6 +1,6 @@
 [package]
 name        = "tokenizers-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "The tokenizer family behind one enum: byte-level BPE as GPT-2 does it, SentencePiece unigram, and WordPiece, with encode to ids, decode from ids, special-token handling, and a vocabulary loaded from a value the caller holds rather than from a file."
 license     = "Apache-2.0"
 
@@ -23,7 +23,7 @@ category    = "ai"
 tags        = ["tokenizer", "bpe", "sentencepiece", "wordpiece", "unigram", "gpt2", "llm", "nlp"]
 repository  = "https://github.com/novolang/tokenizers-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.23.0"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.
